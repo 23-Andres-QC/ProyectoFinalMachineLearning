@@ -8,7 +8,6 @@ El informe (LaTeX, IEEE) está en su propio repositorio: <https://github.com/23-
 
 ```
 pipeline_inundaciones.ipynb   pipeline completo (datasets completos, dos modos: agua y cambio)
-entrenamiento_muestra.ipynb   versión anterior sobre la muestra (referencia)
 predecir_tif.py               CLI: aplica un modelo entrenado a cualquier GeoTIFF VV/VH
 src/
   config.py                   rutas, eventos, partición e hiperparámetros
@@ -19,7 +18,6 @@ scripts/
   descargar_s1_2023.py        descarga de escenas Sentinel-1 2023 (ASF)
   descargas_extra.py          Sen1Floods11 Bolivia + HAND, DEM y JRC
   grafo.xml                   grafo SNAP de preprocesamiento de las escenas de Lima
-  crear_muestra.py            generación de la muestra pequeña usada al inicio
 ```
 
 ## Datos (no incluidos en el repositorio)

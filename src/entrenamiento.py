@@ -105,7 +105,13 @@ def evaluar(modelo, cargador, dispositivo, umbral=C.UMBRAL):
     return {"perdida_val": total / len(cargador.dataset), **metricas(*c)}
 
 
-def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.SALIDA / "modelos", log=print):
+def _log(texto, archivo=C.SALIDA / "entrenamiento.log"):
+    print(texto, flush=True)
+    with open(archivo, "a", encoding="utf-8") as f:
+        f.write(texto + "\n")
+
+
+def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.SALIDA / "modelos", log=_log):
     """Entrena una U-Net y guarda el mejor estado según IoU de validación. Devuelve (mejor, historial)."""
     salida.mkdir(parents=True, exist_ok=True)
     fijar_semilla()
