@@ -1,0 +1,79 @@
+<graph id="lima_s1">
+  <version>1.0</version>
+  <node id="Read">
+    <operator>Read</operator>
+    <parameters>
+      <file>${input}</file>
+    </parameters>
+  </node>
+  <node id="Apply-Orbit-File">
+    <operator>Apply-Orbit-File</operator>
+    <sources><sourceProduct refid="Read"/></sources>
+    <parameters>
+      <orbitType>Sentinel Precise (Auto Download)</orbitType>
+      <continueOnFail>true</continueOnFail>
+    </parameters>
+  </node>
+  <node id="ThermalNoiseRemoval">
+    <operator>ThermalNoiseRemoval</operator>
+    <sources><sourceProduct refid="Apply-Orbit-File"/></sources>
+    <parameters>
+      <selectedPolarisations>VH,VV</selectedPolarisations>
+      <removeThermalNoise>true</removeThermalNoise>
+    </parameters>
+  </node>
+  <node id="Calibration">
+    <operator>Calibration</operator>
+    <sources><sourceProduct refid="ThermalNoiseRemoval"/></sources>
+    <parameters>
+      <selectedPolarisations>VH,VV</selectedPolarisations>
+      <outputSigmaBand>true</outputSigmaBand>
+    </parameters>
+  </node>
+  <node id="Subset">
+    <operator>Subset</operator>
+    <sources><sourceProduct refid="Calibration"/></sources>
+    <parameters>
+      <geoRegion>${region}</geoRegion>
+      <copyMetadata>true</copyMetadata>
+    </parameters>
+  </node>
+  <node id="Speckle-Filter">
+    <operator>Speckle-Filter</operator>
+    <sources><sourceProduct refid="Subset"/></sources>
+    <parameters>
+      <filter>Refined Lee</filter>
+    </parameters>
+  </node>
+  <node id="Terrain-Correction">
+    <operator>Terrain-Correction</operator>
+    <sources><sourceProduct refid="Speckle-Filter"/></sources>
+    <parameters>
+      <demName>Copernicus 30m Global DEM</demName>
+      <demResamplingMethod>BILINEAR_INTERPOLATION</demResamplingMethod>
+      <imgResamplingMethod>BILINEAR_INTERPOLATION</imgResamplingMethod>
+      <pixelSpacingInMeter>10.0</pixelSpacingInMeter>
+      <mapProjection>EPSG:32718</mapProjection>
+      <nodataValueAtSea>false</nodataValueAtSea>
+    </parameters>
+  </node>
+  <node id="LinearToFromdB">
+    <operator>LinearToFromdB</operator>
+    <sources><sourceProduct refid="Terrain-Correction"/></sources>
+  </node>
+  <node id="BandSelect">
+    <operator>BandSelect</operator>
+    <sources><sourceProduct refid="LinearToFromdB"/></sources>
+    <parameters>
+      <sourceBands>Sigma0_VV_db,Sigma0_VH_db</sourceBands>
+    </parameters>
+  </node>
+  <node id="Write">
+    <operator>Write</operator>
+    <sources><sourceProduct refid="BandSelect"/></sources>
+    <parameters>
+      <file>${output}</file>
+      <formatName>GeoTIFF-BigTIFF</formatName>
+    </parameters>
+  </node>
+</graph>

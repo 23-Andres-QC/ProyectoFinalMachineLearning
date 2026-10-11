@@ -1,0 +1,20 @@
+# Datos (no se suben: >30 GB). Ver README para descargarlos.
+Data/
+datos_muestra/
+muestra/
+*.tif
+*.zip
+*.npz
+*.pt
+*.gdb/
+
+# El informe tiene su propio repositorio
+Informe-ProyectoMachineLearning/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
