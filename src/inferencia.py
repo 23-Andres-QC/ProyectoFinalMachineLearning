@@ -54,21 +54,31 @@ def a_grilla(rutas, perfil, remuestreo=Resampling.bilinear):
 
 def predecir_ventanas(modelo, x, dispositivo, lote=16):
     """Ventana deslizante T×T con paso PASO; promedia las probabilidades solapadas."""
+    # Lee cada ventana por separado (x puede ser un memmap) y solo rellena las del borde,
+    # para no duplicar la escena completa en RAM.
     _, H, W = x.shape
-    ph = max(C.T - H, 0) + (-max(H, C.T)) % C.PASO
-    pw = max(C.T - W, 0) + (-max(W, C.T)) % C.PASO
-    x = np.pad(x, ((0, 0), (0, ph), (0, pw)), mode="reflect")
-    suma, n = np.zeros(x.shape[1:], "float32"), np.zeros(x.shape[1:], "float32")
-    pos = [(i, j) for i in range(0, x.shape[1] - C.T + 1, C.PASO) for j in range(0, x.shape[2] - C.T + 1, C.PASO)]
+    Hp = max(H, C.T) + (-max(H, C.T)) % C.PASO
+    Wp = max(W, C.T) + (-max(W, C.T)) % C.PASO
+    suma, n = np.zeros((H, W), "float32"), np.zeros((H, W), "uint8")
+    pos = [(i, j) for i in range(0, Hp - C.T + 1, C.PASO) for j in range(0, Wp - C.T + 1, C.PASO)]
+
+    def ventana(i, j):
+        w = np.asarray(x[:, i:i+C.T, j:j+C.T], dtype="float32")
+        ph, pw = C.T - w.shape[1], C.T - w.shape[2]
+        if ph or pw:
+            w = np.pad(w, ((0, 0), (0, ph), (0, pw)), mode="reflect" if min(w.shape[1:]) > max(ph, pw) else "edge")
+        return w
+
     with torch.no_grad(), torch.autocast(dispositivo, enabled=dispositivo == "cuda"):
         for k in range(0, len(pos), lote):
             bloque = pos[k:k + lote]
-            v = torch.from_numpy(np.stack([x[:, i:i+C.T, j:j+C.T] for i, j in bloque])).to(dispositivo)
+            v = torch.from_numpy(np.stack([ventana(i, j) for i, j in bloque])).to(dispositivo)
             p = torch.sigmoid(modelo(v).float())[:, 0].cpu().numpy()
             for (i, j), pk in zip(bloque, p):
-                suma[i:i+C.T, j:j+C.T] += pk
-                n[i:i+C.T, j:j+C.T] += 1
-    return (suma / np.maximum(n, 1))[:H, :W]
+                h, w = min(C.T, H - i), min(C.T, W - j)
+                suma[i:i+h, j:j+w] += pk[:h, :w]
+                n[i:i+h, j:j+w] += 1
+    return suma / np.maximum(n, 1)
 
 
 def probabilidad(modelo, modo, stats, post, pre, dispositivo):

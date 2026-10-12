@@ -149,31 +149,52 @@ def muestrear(inv, maximo=C.MAX_PARCHES_EVENTO, frac_con=C.FRAC_CON_AGUA, semill
     return inv.loc[sorted(elegidos)].reset_index(drop=True)
 
 
+def _fila_parche(ruta, ds, ev, particion, l, v, vp):
+    return dict(ruta=str(ruta), dataset=ds, evento=ev, particion=particion,
+                tiene_pre=bool(vp.mean() >= C.FRAC_VALIDA_MIN),
+                frac_valida=v.mean(), frac_agua=(l > 0).sum() / v.sum(),
+                frac_inundacion=(l >= 2).sum() / v.sum())
+
+
+def _reutilizar(rutas, ds, ev, particion):
+    """Filas de parches ya guardados en una corrida anterior; None si falta o está dañado alguno."""
+    filas = []
+    for ruta in rutas:
+        try:
+            with np.load(ruta) as d:
+                filas.append(_fila_parche(ruta, ds, ev, particion, d["lab"], d["val"], d["val_pre"]))
+        except Exception:
+            return None
+    return filas
+
+
 def extraer_parches(seleccion, salida=C.SALIDA / "parches"):
-    """Lee cada item una sola vez y guarda sus ventanas elegidas como .npz (float16)."""
+    """Lee cada item una sola vez y guarda sus ventanas elegidas como .npz (float16).
+    Si se interrumpe, al volver a llamarla reutiliza los items cuyos parches ya están completos."""
     filas = []
     for (ds, ev, item), g in tqdm(seleccion.groupby(["dataset", "evento", "item"], sort=False),
                                   total=seleccion[["item"]].drop_duplicates().shape[0], desc="parches"):
+        carpeta = Path(salida) / ds / ev
+        nombre = Path(item).stem if ds != "kurosiwo" else Path(item).name
+        rutas = [carpeta / f"{nombre}_{r.i}_{r.j}.npz" for r in g.itertuples()]
+        previas = _reutilizar(rutas, ds, ev, g.particion.iloc[0]) if all(r.exists() for r in rutas) else None
+        if previas is not None:
+            filas += previas
+            continue
         pre, post, lab, val, val_pre = leer_item(ds, item)
         if pre is None:
             pre = np.full_like(post, np.nan)
         img = _pad(np.concatenate([pre, post]), np.nan)
         lab, val, val_pre = _pad(lab), _pad(val.astype("uint8")), _pad(val_pre.astype("uint8"))
-        carpeta = Path(salida) / ds / ev
         carpeta.mkdir(parents=True, exist_ok=True)
-        nombre = Path(item).stem if ds != "kurosiwo" else Path(item).name
-        for r in g.itertuples():
+        for r, ruta in zip(g.itertuples(), rutas):
             s = (slice(r.i, r.i + C.T), slice(r.j, r.j + C.T))
             v, vp = val[s], val_pre[s] & val[s]
             if v.mean() < C.FRAC_VALIDA_MIN:
                 continue
             l = lab[s] * v
-            ruta = carpeta / f"{nombre}_{r.i}_{r.j}.npz"
             np.savez_compressed(ruta, img=img[(slice(None),) + s].astype("float16"), lab=l, val=v, val_pre=vp)
-            filas.append(dict(ruta=str(ruta), dataset=ds, evento=ev, particion=r.particion,
-                              tiene_pre=bool(vp.mean() >= C.FRAC_VALIDA_MIN),
-                              frac_valida=v.mean(), frac_agua=(l > 0).sum() / v.sum(),
-                              frac_inundacion=(l >= 2).sum() / v.sum()))
+            filas.append(_fila_parche(ruta, ds, ev, r.particion, l, v, vp))
     return pd.DataFrame(filas)
 
 
