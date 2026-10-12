@@ -29,9 +29,11 @@ SIN_AGUA, AGUA_PERMANENTE, INUNDACION_ABIERTA, INUNDACION_URBANA = 0, 1, 2, 3
 #   "agua"   -> 2 canales (VV, VH durante el evento), positivo = cualquier agua. Es la configuración del informe.
 #   "cambio" -> 4 canales (VV, VH antes + VV, VH durante), positivo = inundación nueva.
 #               Solo usa fuentes con imagen previa (Kuro Siwo y UrbanSARFloods).
+# "excluir": Colombia sale del modo agua porque sus etiquetas (Otsu sobre VH) enseñan "oscuro = agua"
+#            y aumentan los falsos positivos en el desierto de Lima (ver scripts/evaluar_datos.py).
 MODOS = {
-    "agua":   {"canales": [2, 3], "positivas": [1, 2, 3], "requiere_pre": False},
-    "cambio": {"canales": [0, 1, 2, 3], "positivas": [2, 3], "requiere_pre": True},
+    "agua":   {"canales": [2, 3], "positivas": [1, 2, 3], "requiere_pre": False, "excluir": ["colombia"]},
+    "cambio": {"canales": [0, 1, 2, 3], "positivas": [2, 3], "requiere_pre": True, "excluir": []},
 }
 NOMBRES_CANALES = ["VV_pre", "VH_pre", "VV_post", "VH_post"]
 
@@ -47,11 +49,11 @@ SEMILLA = 42
 
 # --- Entrenamiento ---
 ENCODERS = ["resnet34", "vgg19", "efficientnet-b0", "mobilenet_v2"]
-MAX_EPOCAS = 40
-PACIENCIA = 6
+MAX_EPOCAS = 10   # la evaluación mostró que el mejor IoU de validación llega en las épocas 1-3
+PACIENCIA = 3
 LOTE = 16
 LR = 1e-4
-NUM_WORKERS = 4
+NUM_WORKERS = 2   # cada proceso auxiliar carga torch (~0.6 GB de RAM en Windows)
 UMBRAL = 0.5
 
 # --- Inferencia sobre escenas ---

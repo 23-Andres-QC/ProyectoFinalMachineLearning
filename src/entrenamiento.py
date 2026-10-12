@@ -1,9 +1,11 @@
 """Dataset de parches, lotes balanceados, pérdida BCE+Dice enmascarada, métricas y bucle de entrenamiento."""
 import random
+from pathlib import Path
 
 import numpy as np, pandas as pd, torch
 import segmentation_models_pytorch as smp
 from torch.utils.data import Dataset, DataLoader, Sampler
+from tqdm.auto import tqdm
 
 from . import config as C
 
@@ -12,8 +14,12 @@ def normalizar(img, validos, stats, canales):
     """img (4|C, H, W) en dB -> canales elegidos normalizados; los inválidos quedan en 0 (= media)."""
     media = np.array(stats["media"], "float32")[canales, None, None]
     std = np.array(stats["std"], "float32")[canales, None, None]
-    x = (np.clip(np.nan_to_num(img, nan=C.DB_MIN), C.DB_MIN, C.DB_MAX) - media) / std
-    return np.where(validos[None], x, 0).astype("float32")
+    x = np.nan_to_num(img, nan=C.DB_MIN).astype("float32", copy=True)
+    np.clip(x, C.DB_MIN, C.DB_MAX, out=x)
+    x -= media
+    x /= std
+    x[:, ~validos] = 0
+    return x
 
 
 class Parches(Dataset):
@@ -58,6 +64,7 @@ def filtrar(indice, modo):
     """Parches utilizables por el modo; en 'cambio' solo los que tienen imagen previa."""
     cfg = C.MODOS[modo]
     df = indice[indice.tiene_pre] if cfg["requiere_pre"] else indice
+    df = df[~df.dataset.isin(cfg.get("excluir", []))]
     col = "frac_inundacion" if modo == "cambio" else "frac_agua"
     df = df.assign(positivo=df[col] > C.FRAC_AGUA_POSITIVO)
     return df.query("particion == 'train'").reset_index(drop=True), df.query("particion == 'val'").reset_index(drop=True)
@@ -94,15 +101,111 @@ def fijar_semilla(s=C.SEMILLA):
 
 def evaluar(modelo, cargador, dispositivo, umbral=C.UMBRAL):
     modelo.eval()
-    c, total = np.zeros(4), 0.0
+    c, total, n = np.zeros(4), 0.0, 0
     with torch.no_grad(), torch.autocast(dispositivo, enabled=dispositivo == "cuda"):
         for img, lab, v in cargador:
             img, lab, v = img.to(dispositivo), lab.to(dispositivo), v.to(dispositivo)
             logits = modelo(img).float()
             total += perdida(logits, lab, v).item() * len(img)
+            n += len(img)
             p, l, m = torch.sigmoid(logits) >= umbral, lab > 0.5, v > 0.5
             c += [(p & l & m).sum().item(), (p & ~l & m).sum().item(), (~p & l & m).sum().item(), (~p & ~l & m).sum().item()]
-    return {"perdida_val": total / len(cargador.dataset), **metricas(*c)}
+    return {"perdida_val": total / max(n, 1), **metricas(*c)}
+
+
+# ---------------------------------------------------------------- carga con GPU
+# Los .npz comprimidos se empaquetan una vez en arreglos .npy sin comprimir (memmap).
+# Así no hacen falta procesos auxiliares (cada uno carga torch y ~0.6 GB de RAM en Windows):
+# la CPU solo lee bytes del disco y la normalización y los aumentos se hacen en la GPU.
+
+def empaquetar(indice, carpeta=C.SALIDA / "empaquetado"):
+    """Crea (una vez) img (N,4,T,T) float16, lab/val/val_pre (N,T,T) uint8. Devuelve {ruta: posición}."""
+    carpeta = Path(carpeta)
+    lista = carpeta / "rutas.csv"
+    if lista.exists():
+        rutas = pd.read_csv(lista).ruta.tolist()
+        if set(rutas) >= set(indice.ruta):
+            return carpeta, {r: k for k, r in enumerate(rutas)}
+    carpeta.mkdir(parents=True, exist_ok=True)
+    rutas, N = indice.ruta.tolist(), len(indice)
+    arr = {"img": np.lib.format.open_memmap(carpeta / "img.npy", "w+", "float16", (N, 4, C.T, C.T))}
+    for k in ["lab", "val", "val_pre"]:
+        arr[k] = np.lib.format.open_memmap(carpeta / f"{k}.npy", "w+", "uint8", (N, C.T, C.T))
+    for i, r in enumerate(tqdm(rutas, desc="empaquetando")):
+        with np.load(r) as d:
+            for k in arr:
+                arr[k][i] = d[k]
+        if i % 500 == 499:              # vacía a disco para no acumular páginas en RAM
+            for a in arr.values():
+                a.flush()
+    for a in arr.values():
+        a.flush()
+    del arr
+    pd.DataFrame({"ruta": rutas}).to_csv(lista, index=False)
+    return carpeta, {r: k for k, r in enumerate(rutas)}
+
+
+class _ArchivoNpy:
+    """Lee filas sueltas de un .npy grande sin mapearlo en memoria."""
+    def __init__(self, ruta):
+        self.f = open(ruta, "rb")
+        version = np.lib.format.read_magic(self.f)
+        leer_cab = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+        self.forma, _, self.dtype = leer_cab(self.f)
+        self.inicio = self.f.tell()
+        self.fila = int(np.prod(self.forma[1:])) * self.dtype.itemsize
+
+    def leer(self, filas):
+        out = np.empty((len(filas),) + tuple(self.forma[1:]), self.dtype)
+        for k, i in enumerate(filas):
+            self.f.seek(self.inicio + int(i) * self.fila)
+            self.f.readinto(memoryview(out[k]).cast("B"))
+        return out
+
+
+class CargadorGPU:
+    """Itera lotes (x, y, m) ya en la GPU. `lotes` (p. ej. LotesBalanceados) da índices sobre `posiciones`;
+    sin `lotes` recorre todo en orden (validación)."""
+    def __init__(self, carpeta, posiciones, modo, stats, dispositivo, aumentar, lotes=None, lote=C.LOTE):
+        # Lectura con read() y no memmap: lo leído queda en la caché de Windows (memoria disponible)
+        # en lugar de sumarse a la memoria del proceso.
+        self.arch = {k: _ArchivoNpy(Path(carpeta) / f"{k}.npy") for k in ["img", "lab", "val", "val_pre"]}
+        self.pos, self.cfg, self.disp, self.aumentar = np.asarray(posiciones), C.MODOS[modo], dispositivo, aumentar
+        self.lotes, self.lote = lotes, lote
+        cn = self.cfg["canales"]
+        self.media = torch.tensor(stats["media"], device=dispositivo)[cn].view(1, -1, 1, 1)
+        self.std = torch.tensor(stats["std"], device=dispositivo)[cn].view(1, -1, 1, 1)
+        self.positivas = torch.tensor(self.cfg["positivas"], device=dispositivo)
+
+    def __len__(self):
+        return len(self.lotes) if self.lotes is not None else -(-len(self.pos) // self.lote)
+
+    def _lote(self, idx):
+        idx = np.sort(self.pos[idx])                     # lectura secuencial del disco
+        t = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(self.disp, non_blocking=True)
+        x = t(self.arch["img"].leer(idx)[:, self.cfg["canales"]]).float()
+        lab, m = t(self.arch["lab"].leer(idx)), t(self.arch["val"].leer(idx))
+        if self.cfg["requiere_pre"]:
+            m = m & t(self.arch["val_pre"].leer(idx))
+        x = (torch.nan_to_num(x, nan=C.DB_MIN).clamp_(C.DB_MIN, C.DB_MAX) - self.media) / self.std
+        m = m.bool().unsqueeze(1)
+        x = x * m
+        y = torch.isin(lab, self.positivas).unsqueeze(1).float()
+        m = m.float()
+        if self.aumentar:
+            for b in range(len(x)):
+                g, f = int(torch.randint(4, ())), bool(torch.rand(()) < 0.5)
+                for a in (x, y, m):
+                    a[b] = torch.rot90(a[b], g, dims=(1, 2))
+                    if f:
+                        a[b] = torch.flip(a[b], dims=(2,))
+        return x, y, m
+
+    def __iter__(self):
+        lotes = self.lotes if self.lotes is not None else \
+            [list(range(i, min(i + self.lote, len(self.pos)))) for i in range(0, len(self.pos), self.lote)]
+        for idx in lotes:
+            yield self._lote(np.asarray(idx))
 
 
 def _log(texto, archivo=C.SALIDA / "entrenamiento.log"):
@@ -115,10 +218,16 @@ def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.SALIDA / "m
     """Entrena una U-Net y guarda el mejor estado según IoU de validación. Devuelve (mejor, historial)."""
     salida.mkdir(parents=True, exist_ok=True)
     fijar_semilla()
-    kw = dict(num_workers=C.NUM_WORKERS, persistent_workers=C.NUM_WORKERS > 0, pin_memory=dispositivo == "cuda")
-    cargador_train = DataLoader(Parches(train, modo, stats, aumentar=True),
-                                batch_sampler=LotesBalanceados(np.flatnonzero(train.positivo), len(train), C.LOTE), **kw)
-    cargador_val = DataLoader(Parches(val, modo, stats, aumentar=False), batch_size=C.LOTE, shuffle=False, **kw)
+    if dispositivo == "cuda":
+        carpeta, pos = empaquetar(pd.concat([train, val]))
+        cargador_train = CargadorGPU(carpeta, train.ruta.map(pos), modo, stats, dispositivo, aumentar=True,
+                                     lotes=LotesBalanceados(np.flatnonzero(train.positivo), len(train), C.LOTE))
+        cargador_val = CargadorGPU(carpeta, val.ruta.map(pos), modo, stats, dispositivo, aumentar=False)
+    else:
+        kw = dict(num_workers=C.NUM_WORKERS, persistent_workers=C.NUM_WORKERS > 0)
+        cargador_train = DataLoader(Parches(train, modo, stats, aumentar=True),
+                                    batch_sampler=LotesBalanceados(np.flatnonzero(train.positivo), len(train), C.LOTE), **kw)
+        cargador_val = DataLoader(Parches(val, modo, stats, aumentar=False), batch_size=C.LOTE, shuffle=False, **kw)
 
     modelo = crear_modelo(encoder, modo).to(dispositivo)
     opt = torch.optim.AdamW(modelo.parameters(), lr=C.LR, weight_decay=1e-4)
@@ -135,7 +244,11 @@ def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.SALIDA / "m
             with torch.autocast(dispositivo, enabled=dispositivo == "cuda"):
                 logits = modelo(img)
             l = perdida(logits.float(), lab, v)
+            if not torch.isfinite(l):        # evita que un desborde de fp16 arruine los pesos (visto con VGG19)
+                continue
             escalador.scale(l).backward()
+            escalador.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(modelo.parameters(), 1.0)
             escalador.step(opt)
             escalador.update()
             suma += l.item()
