@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agua en Lima Sur 2023</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --fondo: #ffffff; --texto: #1f2328; --suave: #59636e; --borde: #d1d9e0;
+    --agua: rgb(30, 136, 229); --inund: rgb(229, 57, 53); --sinpre: rgba(120, 120, 120, .45);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fondo: #1d2125; --texto: #e6edf3; --suave: #9198a1; --borde: #3d444d; }
+  }
+  html, body { height: 100%; margin: 0; background: var(--fondo); color: var(--texto);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #mapa { position: absolute; inset: 0; }
+  .mascara { image-rendering: pixelated; }
+  .panel { background: var(--fondo); color: var(--texto); border: 1px solid var(--borde);
+    border-radius: 8px; padding: 10px 12px; box-shadow: 0 2px 8px rgba(0,0,0,.18); max-width: 280px; }
+  .panel h1 { font-size: 15px; margin: 0 0 4px; }
+  .panel p { margin: 0 0 8px; color: var(--suave); font-size: 12px; }
+  .cifras { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  .cifras b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+  .cifras span { color: var(--suave); font-size: 11px; }
+  .leyenda div { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
+  .leyenda i { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+  .leyenda .rampa { width: 100%; height: 10px; border-radius: 3px;
+    background: linear-gradient(90deg, rgb(253,231,37), rgb(33,145,140), rgb(59,82,139), rgb(68,1,84)); }
+  .leyenda .ejes { display: flex; justify-content: space-between; color: var(--suave); font-size: 11px; }
+  .leaflet-popup-content { font-size: 13px; }
+  .leaflet-popup-content table { border-collapse: collapse; }
+  .leaflet-popup-content td { padding: 1px 6px 1px 0; }
+  .leaflet-popup-content td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 600px) { .panel { max-width: 200px; } .cifras b { font-size: 15px; } }
+</style>
+</head>
+<body>
+<div id="mapa"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const D = /*__DATOS__*/null;
+const fmt = (x, d = 2) => x.toLocaleString("es-PE", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+const mapa = L.map("mapa", { preferCanvas: true }).fitBounds(D.limites);
+
+const calles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "&copy; OpenStreetMap" });
+const satelite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 19, attribution: "Esri, Maxar, Earthstar Geographics" }).addTo(mapa);
+
+// distritos coloreados por el % de su área con inundación nueva
+const pcts = D.distritos.features.map(f => f.properties.pct_inundacion).sort((a, b) => a - b);
+const pmax = pcts[pcts.length - 1] || 1;
+const colorDistrito = p => {
+  const k = Math.sqrt(p / pmax);
+  return `rgba(229, 57, 53, ${(0.05 + 0.45 * k).toFixed(2)})`;
+};
+const distritos = L.geoJSON(D.distritos, {
+  style: f => ({ color: "#ffffff", weight: 1, opacity: .8, fillColor: colorDistrito(f.properties.pct_inundacion), fillOpacity: 1 }),
+  onEachFeature: (f, capa) => {
+    const p = f.properties;
+    capa.bindPopup(`<b>${p.distrito}</b><table>
+      <tr><td>Área observada</td><td>${fmt(p.km2_observados)} km²</td></tr>
+      <tr><td>Agua (2 canales)</td><td>${fmt(p.km2_agua_2canales)} km²</td></tr>
+      <tr><td>Inundación nueva</td><td>${fmt(p.km2_inundacion, 3)} km²</td></tr>
+      <tr><td>% inundado</td><td>${fmt(p.pct_inundacion, 3)} %</td></tr></table>`);
+    capa.on({ mouseover: e => e.target.setStyle({ weight: 2.5 }), mouseout: e => distritos.resetStyle(e.target) });
+  }
+});
+
+const imagen = (src, limites, clase, opacidad = 1) =>
+  L.imageOverlay(src, limites, { className: clase, opacity: opacidad, interactive: false });
+const prob = imagen(D.prob, D.limites_prob, "", .9);
+const agua = imagen(D.agua, D.limites, "mascara").addTo(mapa);
+const sinPre = imagen(D.sin_pre, D.limites, "mascara");
+const inundacion = imagen(D.inundacion, D.limites, "mascara").addTo(mapa);
+
+// un círculo por mancha, con área proporcional a la superficie detectada
+const manchas = L.layerGroup(D.manchas.map(([lat, lon, m2]) =>
+  L.circleMarker([lat, lon], { radius: Math.max(3, Math.min(14, Math.sqrt(m2) / 12)),
+    color: "#ffffff", weight: 1, fillColor: "rgb(229,57,53)", fillOpacity: .85 })
+   .bindPopup(`<b>Inundación nueva</b><br>${fmt(m2 / 1e4, 2)} ha · ${fmt(lat, 5)}, ${fmt(lon, 5)}`)
+)).addTo(mapa);
+
+L.control.layers(
+  { "Satélite": satelite, "Calles": calles },
+  { "Distritos (% inundado)": distritos, "Probabilidad de agua": prob, "Agua (HAND + JRC)": agua,
+    "Sin imagen previa": sinPre, "Inundación nueva": inundacion, "Manchas de inundación": manchas },
+  { collapsed: window.innerWidth < 600 }
+).addTo(mapa);
+L.control.scale({ imperial: false }).addTo(mapa);
+
+const panel = (posicion, html) => {
+  const c = L.control({ position: posicion });
+  c.onAdd = () => { const d = L.DomUtil.create("div", "panel"); d.innerHTML = html;
+    L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d); return d; };
+  return c.addTo(mapa);
+};
+
+const R = D.resumen;
+panel("topleft", `<h1>Agua en Lima Sur · 16/03/2023</h1>
+  <p>Sentinel-1 VV/VH segmentado con U-Net. Agua filtrada con HAND y JRC; inundación nueva por cambio respecto a la imagen previa.</p>
+  <div class="cifras">
+    <div><b>${fmt(R.km2_agua)} km²</b><span>agua (${fmt(R.pct_agua)} %)</span></div>
+    <div><b>${fmt(R.km2_inundacion, 3)} km²</b><span>inundación nueva (${fmt(R.pct_inundacion, 3)} %)</span></div>
+    <div><b>${R.manchas.toLocaleString("es-PE")}</b><span>manchas detectadas</span></div>
+    <div><b>${D.distritos.features.length}</b><span>distritos</span></div>
+  </div>`);
+
+panel("bottomright", `<div class="leyenda">
+  <div><i style="background:var(--agua)"></i>Agua</div>
+  <div><i style="background:var(--inund)"></i>Inundación nueva</div>
+  <div><i style="background:var(--sinpre)"></i>Sin imagen previa</div>
+  <div style="display:block;margin-top:6px">Probabilidad de agua<div class="rampa"></div>
+    <div class="ejes"><span>0,3</span><span>1,0</span></div></div>
+</div>`).getContainer().classList.add("leyenda");
+</script>
+</body>
+</html>
