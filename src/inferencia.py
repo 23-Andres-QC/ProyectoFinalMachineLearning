@@ -12,11 +12,11 @@ from .datos import validos_db
 from .entrenamiento import crear_modelo, normalizar, metricas, conteos
 
 
-def cargar_stats(ruta=C.SALIDA / "stats.json"):
+def cargar_stats(ruta=C.PREPARADO / "stats.json"):
     return json.load(open(ruta))
 
 
-def cargar_modelo(modo, encoder, dispositivo, carpeta=C.SALIDA / "modelos"):
+def cargar_modelo(modo, encoder, dispositivo, carpeta=C.RESULTADOS / "modelos"):
     modelo = crear_modelo(encoder, modo, pesos=None).to(dispositivo)
     modelo.load_state_dict(torch.load(Path(carpeta) / f"unet_{modo}_{encoder}.pt", map_location=dispositivo))
     return modelo.eval()

@@ -35,8 +35,7 @@ for destino, url in aux.items():
 # ---------- 2) Sen1Floods11 Bolivia (test oficial del paper) ----------
 BUCKET, BASE, PAIS = "sen1floods11", "v1.1/data/flood_events", "Bolivia"
 DEST = f"sen1floods11_{PAIS.lower()}"
-CAPAS = {"HandLabeled":   ["S1Hand", "LabelHand", "S1OtsuLabelHand", "JRCWaterHand"],
-         "WeaklyLabeled": ["S1Weak", "S1OtsuLabelWeak"]}
+CAPAS = {"HandLabeled": ["S1Hand", "LabelHand"]}   # lo único que se usa (prueba con etiqueta manual)
 
 def listar(prefijo):
     url = f"https://storage.googleapis.com/storage/v1/b/{BUCKET}/o"

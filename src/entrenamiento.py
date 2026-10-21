@@ -61,10 +61,8 @@ class LotesBalanceados(Sampler):
 
 
 def filtrar(indice, modo):
-    """Parches utilizables por el modo; en 'cambio' solo los que tienen imagen previa."""
-    cfg = C.MODOS[modo]
-    df = indice[indice.tiene_pre] if cfg["requiere_pre"] else indice
-    df = df[~df.dataset.isin(cfg.get("excluir", []))]
+    """Parches que la evaluación de calidad aprobó para el modo (columna `agua` / `cambio` del índice)."""
+    df = indice[indice[modo]]
     col = "frac_inundacion" if modo == "cambio" else "frac_agua"
     df = df.assign(positivo=df[col] > C.FRAC_AGUA_POSITIVO)
     return df.query("particion == 'train'").reset_index(drop=True), df.query("particion == 'val'").reset_index(drop=True)
@@ -118,7 +116,7 @@ def evaluar(modelo, cargador, dispositivo, umbral=C.UMBRAL):
 # Así no hacen falta procesos auxiliares (cada uno carga torch y ~0.6 GB de RAM en Windows):
 # la CPU solo lee bytes del disco y la normalización y los aumentos se hacen en la GPU.
 
-def empaquetar(indice, carpeta=C.SALIDA / "empaquetado"):
+def empaquetar(indice, carpeta=C.PREPARADO / "empaquetado"):
     """Crea (una vez) img (N,4,T,T) float16, lab/val/val_pre (N,T,T) uint8. Devuelve {ruta: posición}."""
     carpeta = Path(carpeta)
     lista = carpeta / "rutas.csv"
@@ -208,13 +206,13 @@ class CargadorGPU:
             yield self._lote(np.asarray(idx))
 
 
-def _log(texto, archivo=C.SALIDA / "entrenamiento.log"):
+def _log(texto, archivo=C.RESULTADOS / "entrenamiento.log"):
     print(texto, flush=True)
     with open(archivo, "a", encoding="utf-8") as f:
         f.write(texto + "\n")
 
 
-def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.SALIDA / "modelos", log=_log):
+def entrenar(encoder, modo, train, val, stats, dispositivo, salida=C.RESULTADOS / "modelos", log=_log):
     """Entrena una U-Net y guarda el mejor estado según IoU de validación. Devuelve (mejor, historial)."""
     salida.mkdir(parents=True, exist_ok=True)
     fijar_semilla()

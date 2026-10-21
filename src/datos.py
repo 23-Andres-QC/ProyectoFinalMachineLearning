@@ -1,15 +1,18 @@
-"""Lectura de las fuentes internacionales, inventario de parches, muestreo por evento y normalización.
+"""Lectura de Kuro Siwo, partición por bloques, inventario de parches, muestreo por evento y normalización.
 
-Cada fuente se convierte a un formato común:
+Cada tesela se convierte a un formato común:
     pre, post : (2, H, W) en dB, canales [VV, VH]; pre es None si la fuente no tiene imagen previa
     lab       : (H, W) uint8 con las clases de config (0 sin agua, 1 permanente, 2 inundación abierta, 3 urbana)
     val       : (H, W) bool, píxeles con etiqueta e imagen válidas
 """
-import json, re, random
+import json, random
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np, pandas as pd, rasterio
-from scipy.ndimage import zoom
+from rasterio.warp import reproject, transform_bounds, Resampling
+from rasterio.transform import array_bounds
+from scipy.spatial import cKDTree
 from tqdm.auto import tqdm
 
 from . import config as C
@@ -35,68 +38,127 @@ def _ks_capa(p, clave):
     return leer(f[0])[0] if f else None
 
 
-def _us_gt(ruta):
-    ruta = Path(ruta)
-    return ruta.parent.parent / "GT" / ruta.name.replace("_SAR.tif", "_GT.tif")
+# ---------------------------------------------------------------- agua permanente (JRC)
+
+def tesela_jrc(lon, lat):
+    """Nombre de la tesela JRC de 10° que contiene (lon, lat); se nombran por su esquina superior izquierda."""
+    x, y = int(np.floor(lon / 10) * 10), int(np.ceil(lat / 10) * 10)
+    return f"{abs(x)}{'E' if x >= 0 else 'W'}_{abs(y)}{'N' if y >= 0 else 'S'}"
+
+
+def _grilla_etiqueta(dataset, item):
+    """Ráster cuya grilla (nativa) tiene la etiqueta del item."""
+    return next(Path(item).glob("MK0_MLU_*.tif"))
+
+
+def teselas_jrc_necesarias(items):
+    teselas = set()
+    for it in items.itertuples():
+        with rasterio.open(_grilla_etiqueta(it.dataset, it.item)) as s:
+            w, so, e, n = transform_bounds(s.crs, "EPSG:4326", *s.bounds)
+        teselas |= {tesela_jrc(x, y) for x in (w, e) for y in (so, n)}
+    return sorted(teselas)
+
+
+@lru_cache(None)
+def _limites_jrc():
+    lim = []
+    for r in sorted(C.JRC_GLOBAL.glob("*.tif")):
+        with rasterio.open(r) as s:
+            lim.append((r, s.bounds))
+    return lim
+
+
+def jrc_en_grilla(forma, transform, crs):
+    """Ocurrencia de agua JRC (0-100 %) en la grilla dada; NaN donde no hay tesela o dato."""
+    w, s, e, n = transform_bounds(crs, "EPSG:4326", *array_bounds(*forma, transform))
+    out = np.full(forma, np.nan, "float32")
+    for r, b in _limites_jrc():
+        if b.left < e and b.right > w and b.bottom < n and b.top > s:
+            tmp = np.full(forma, np.nan, "float32")
+            with rasterio.open(r) as src:
+                reproject(rasterio.band(src, 1), tmp, dst_transform=transform, dst_crs=crs,
+                          resampling=Resampling.bilinear, src_nodata=255, dst_nodata=np.nan)
+            out = np.where(np.isnan(out), tmp, out)
+    return out
+
+
+def jrc_item(dataset, item, cache=C.PREPARADO / "jrc"):
+    """Ocurrencia JRC en la grilla nativa de la etiqueta del item (uint8, 255 = sin dato), guardada en disco."""
+    ref = _grilla_etiqueta(dataset, item)
+    ruta = Path(cache) / dataset / f"{Path(item).name}.npz"
+    if ruta.exists():
+        return np.load(ruta)["jrc"]
+    with rasterio.open(ref) as s:
+        occ = jrc_en_grilla((s.height, s.width), s.transform, s.crs)
+    occ = np.where(np.isnan(occ), 255, np.round(occ)).astype("uint8")
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(ruta, jrc=occ)
+    return occ
 
 
 def listar_items():
-    """Devuelve un DataFrame con un registro por archivo/tesela de cada fuente internacional."""
+    """Un registro por tesela de Kuro Siwo de los eventos de EVENTOS_KS, con su partición."""
     filas = []
-    for r in sorted((C.COLOMBIA / "S1Weak").glob("*_S1Weak.tif")):
-        etq = C.COLOMBIA / "S1OtsuLabelWeak" / r.name.replace("S1Weak", "S1OtsuLabelWeak")
-        if etq.exists():
-            filas.append(dict(dataset="colombia", evento="colombia", item=str(r), tiene_pre=False))
     for info in sorted(C.KUROSIWO.glob("*/**/info.json")):
         p = info.parent
-        if all(list(p.glob(f"{k}_*.tif")) for k in ["MS1_IVV", "MS1_IVH", "MK0_MLU", "MK0_MNA"]):
-            act = json.load(open(info))["actid"]
+        act = json.load(open(info))["actid"]
+        if act in C.EVENTOS_KS and all(list(p.glob(f"{k}_*.tif")) for k in ["MS1_IVV", "MS1_IVH", "MK0_MLU", "MK0_MNA"]):
             filas.append(dict(dataset="kurosiwo", evento=C.EVENTOS_KS[act], item=str(p),
                               tiene_pre=bool(list(p.glob("SL1_IVV_*.tif")) and list(p.glob("SL1_IVH_*.tif")))))
-    for r in sorted(C.URBANSAR.glob("*/SAR/*_SAR.tif")):
-        if _us_gt(r).exists():
-            ev = re.match(r"\d+_[A-Za-z]+", r.name).group()
-            filas.append(dict(dataset="urbansar", evento=ev, item=str(r), tiene_pre=True))
     items = pd.DataFrame(filas)
     if C.MAX_ITEMS_EVENTO:
         items = items.sample(frac=1, random_state=C.SEMILLA).groupby("evento").head(C.MAX_ITEMS_EVENTO)
-    items = items.reset_index(drop=True)
-    items["particion"] = np.where(items.evento.isin(C.EVENTOS_VAL), "val", "train")
-    return items
+    return particion_por_bloques(items.reset_index(drop=True))
+
+
+def particion_por_bloques(items):
+    """Validación = bloques de VAL_BLOQUE_KM km de VAL_EVENTO elegidos al azar hasta cubrir VAL_FRAC de sus teselas.
+    Las teselas de entrenamiento que tocan a una de validación se descartan para que no compartan bordes."""
+    items = items.assign(particion="train")
+    ev = items[items.evento == C.VAL_EVENTO]
+    xy = []
+    for it in ev.itertuples():
+        with rasterio.open(_grilla_etiqueta("kurosiwo", it.item)) as s:
+            b = s.bounds
+            xy.append(((b.left + b.right) / 2, (b.bottom + b.top) / 2, b.right - b.left))
+    xy = np.array(xy)
+    lado = C.VAL_BLOQUE_KM * 1000
+    bloque = pd.Series([f"{int(x // lado)}_{int(y // lado)}" for x, y, _ in xy], index=ev.index)
+    rng = random.Random(C.SEMILLA)
+    orden = sorted(bloque.unique())
+    rng.shuffle(orden)
+    val = []
+    for b in orden:
+        if len(val) >= C.VAL_FRAC * len(ev):
+            break
+        val += bloque.index[bloque == b].tolist()
+    items.loc[val, "particion"] = "val"
+    tr = ev.index.difference(val)
+    if len(val) and len(tr):
+        pos = pd.Series(range(len(ev)), index=ev.index)
+        d, _ = cKDTree(xy[pos[val], :2]).query(xy[pos[tr], :2])
+        tocan = tr[d < 1.1 * np.median(xy[:, 2])]          # centros a menos de ~1 tesela de distancia
+        items = items.drop(tocan)
+    return items.reset_index(drop=True)
 
 
 def leer_etiqueta(dataset, item):
-    """Lectura barata (solo etiquetas) para el inventario."""
-    if dataset == "colombia":
-        r = Path(item)
-        e = leer(r.parent.parent / "S1OtsuLabelWeak" / r.name.replace("S1Weak", "S1OtsuLabelWeak"))[0]
-        return np.where(e == 1, C.AGUA_PERMANENTE, C.SIN_AGUA).astype("uint8"), e != -1
-    if dataset == "kurosiwo":
-        mlu, mna = _ks_capa(item, "MK0_MLU"), _ks_capa(item, "MK0_MNA")
-        return np.where(mlu == 3, 0, mlu).astype("uint8"), (mna == 1) & (mlu != 3)
-    gt = leer(_us_gt(item))[0]
-    lab = np.select([gt == 1, gt == 2], [C.INUNDACION_ABIERTA, C.INUNDACION_URBANA], C.SIN_AGUA).astype("uint8")
-    # UrbanSARFloods está a ~20 m: se lleva a la grilla de 10 m del resto.
-    return zoom(lab, 2, order=0), np.ones((lab.shape[0] * 2, lab.shape[1] * 2), bool)
+    """Lectura barata (solo etiquetas) para el inventario. MK0_MLU: 0 sin agua, 1 permanente, 2 inundación, 3 inválido."""
+    mlu, mna = _ks_capa(item, "MK0_MLU"), _ks_capa(item, "MK0_MNA")
+    return np.where(mlu == 3, 0, mlu).astype("uint8"), (mna == 1) & (mlu != 3)
 
 
 def leer_item(dataset, item):
-    """Lectura completa: imágenes en dB + etiqueta + máscaras de validez."""
+    """Lectura completa: imágenes en dB (Kuro Siwo viene en potencia lineal) + etiqueta + máscaras de validez."""
     lab, val = leer_etiqueta(dataset, item)
-    if dataset == "colombia":
-        post, pre = leer(item), None
-    elif dataset == "kurosiwo":
-        crudo = np.stack([_ks_capa(item, "MS1_IVV"), _ks_capa(item, "MS1_IVH")])
-        val &= (crudo > 0).all(0)
-        post = a_db(crudo)
-        pre = None
-        if list(Path(item).glob("SL1_IVV_*.tif")):
-            crudo_pre = np.stack([_ks_capa(item, "SL1_IVV"), _ks_capa(item, "SL1_IVH")])
-            pre = np.where((crudo_pre > 0).all(0), a_db(crudo_pre), np.nan)
-    else:
-        a = leer(item)  # b1-4 coherencia; b5 VH pre, b6 VV pre, b7 VH post, b8 VV post (dB)
-        post = zoom(np.stack([a[7], a[6]]), (1, 2, 2), order=1)
-        pre = zoom(np.stack([a[5], a[4]]), (1, 2, 2), order=1)
+    crudo = np.stack([_ks_capa(item, "MS1_IVV"), _ks_capa(item, "MS1_IVH")])
+    val &= (crudo > 0).all(0)
+    post = a_db(crudo)
+    pre = None
+    if list(Path(item).glob("SL1_IVV_*.tif")):
+        crudo_pre = np.stack([_ks_capa(item, "SL1_IVV"), _ks_capa(item, "SL1_IVH")])
+        pre = np.where((crudo_pre > 0).all(0), a_db(crudo_pre), np.nan)
     val &= validos_db(post)
     val_pre = validos_db(pre) if pre is not None else np.zeros_like(val)
     return pre, post, lab, val, val_pre
@@ -113,6 +175,12 @@ def _pad(a, valor=0):
     H, W = a.shape[-2:]
     pads = [(0, 0)] * (a.ndim - 2) + [(0, (-H) % C.T), (0, (-W) % C.T)]
     return np.pad(a, pads, constant_values=valor)
+
+
+def contar_ventanas(val):
+    """Ventanas T×T con al menos FRAC_VALIDA_MIN de píxeles válidos (las que entrarían al inventario)."""
+    v = _pad(val.astype("uint8"))
+    return sum(v[i:i+C.T, j:j+C.T].mean() >= C.FRAC_VALIDA_MIN for i, j in _ventanas(v.shape))
 
 
 def inventario(items):
@@ -134,10 +202,10 @@ def inventario(items):
 
 
 def muestrear(inv, maximo=C.MAX_PARCHES_EVENTO, frac_con=C.FRAC_CON_AGUA, semilla=C.SEMILLA):
-    """Tope de parches por evento manteniendo una proporción de parches con agua."""
+    """Tope de parches por evento y partición manteniendo una proporción de parches con agua."""
     rng = random.Random(semilla)
     elegidos = []
-    for _, g in inv.groupby("evento", sort=True):
+    for _, g in inv.groupby(["evento", "particion"], sort=True):
         idx_con = g.index[g.frac_agua > C.FRAC_AGUA_POSITIVO].tolist()
         idx_sin = g.index[g.frac_agua <= C.FRAC_AGUA_POSITIVO].tolist()
         rng.shuffle(idx_con), rng.shuffle(idx_sin)
@@ -168,18 +236,18 @@ def _reutilizar(rutas, ds, ev, particion):
     return filas
 
 
-def extraer_parches(seleccion, salida=C.SALIDA / "parches"):
+def extraer_parches(seleccion, salida=C.PREPARADO / "parches"):
     """Lee cada item una sola vez y guarda sus ventanas elegidas como .npz (float16).
     Si se interrumpe, al volver a llamarla reutiliza los items cuyos parches ya están completos."""
     filas = []
     for (ds, ev, item), g in tqdm(seleccion.groupby(["dataset", "evento", "item"], sort=False),
                                   total=seleccion[["item"]].drop_duplicates().shape[0], desc="parches"):
         carpeta = Path(salida) / ds / ev
-        nombre = Path(item).stem if ds != "kurosiwo" else Path(item).name
+        nombre = Path(item).name
         rutas = [carpeta / f"{nombre}_{r.i}_{r.j}.npz" for r in g.itertuples()]
         previas = _reutilizar(rutas, ds, ev, g.particion.iloc[0]) if all(r.exists() for r in rutas) else None
         if previas is not None:
-            filas += previas
+            filas += [dict(f, item=item) for f in previas]
             continue
         pre, post, lab, val, val_pre = leer_item(ds, item)
         if pre is None:
@@ -194,7 +262,7 @@ def extraer_parches(seleccion, salida=C.SALIDA / "parches"):
                 continue
             l = lab[s] * v
             np.savez_compressed(ruta, img=img[(slice(None),) + s].astype("float16"), lab=l, val=v, val_pre=vp)
-            filas.append(_fila_parche(ruta, ds, ev, r.particion, l, v, vp))
+            filas.append(dict(_fila_parche(ruta, ds, ev, r.particion, l, v, vp), item=item))
     return pd.DataFrame(filas)
 
 

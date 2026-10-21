@@ -28,13 +28,13 @@ def main():
     ap.add_argument("--umbral", type=float, default=C.UMBRAL)
     ap.add_argument("--hand", action="store_true", help=f"descarta píxeles con HAND >= {C.HAND_MAX} m")
     ap.add_argument("--referencia", default=None, help="GeoTIFF con -1 inválido, 0 sin agua, 1 agua")
-    ap.add_argument("--salida", default=str(C.SALIDA / "predicciones"))
+    ap.add_argument("--salida", default=str(C.RESULTADOS / "predicciones"))
     a = ap.parse_args()
 
     if a.modo == "cambio" and a.pre is None:
         ap.error("el modo cambio necesita --pre")
     dispositivo = "cuda" if torch.cuda.is_available() else "cpu"
-    encoder = a.encoder or pd.read_csv(C.SALIDA / "resultados_val.csv").query("modo == @a.modo").sort_values("IoU").encoder.iloc[-1]
+    encoder = a.encoder or pd.read_csv(C.RESULTADOS / "resultados_val.csv").query("modo == @a.modo").sort_values("IoU").encoder.iloc[-1]
     modelo, stats = I.cargar_modelo(a.modo, encoder, dispositivo), I.cargar_stats()
 
     post, perfil = I.leer_escena(a.tif, (a.vv, a.vh), a.lineal)

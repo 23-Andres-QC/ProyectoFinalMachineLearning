@@ -1,34 +1,32 @@
-"""Evaluación de los datos de entrenamiento: ¿sirven para Lima y aporta usar más datos?
+"""Experimentos sobre los datos de entrenamiento: ¿aporta usar más datos y qué aporta cada fuente?
 
-Etapas (cada una guarda su resultado en Data/procesado/evaluacion/ y se salta si ya existe):
-  1. Inventario de ventanas (se comparte con el notebook principal).
-  2. Radiometría por evento: separabilidad agua/no agua, "tierra oscura" y similitud con Lima.
-  3. Extracción de parches y normalización (se comparten con el notebook principal).
-  4. Experimentos con U-Net MobileNetV2 y presupuesto fijo de pasos:
-       - curva de aprendizaje (10, 25, 50 y 100 % de los parches de train, por evento)
-       - ablación: entrenar sin cada dataset
-     Cada modelo se mide en validación (por fuente), Bolivia y Lima (2017 y 2023).
+Consume lo que deja preparacion_datos.ipynb en Data/procesado/preparado/ (no lee datos crudos).
+La calidad de cada evento (etiquetas, radiometría, similitud con Lima) ya se evalúa en ese notebook.
+Experimentos con U-Net MobileNetV2 y presupuesto fijo de pasos, guardados en Data/procesado/resultados/evaluacion_datos/
+(cada uno se salta si ya existe):
+  - curva de aprendizaje (10, 25, 50 y 100 % de los parches de train, por evento)
+  - ablación: entrenar sin cada evento
+Cada modelo se mide en validación (por fuente), Bolivia y Lima (2017 y 2023).
 
 Uso:  python scripts/evaluar_datos.py
 """
-import sys, json, time, glob, warnings
+import sys, json, time, warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 warnings.filterwarnings("ignore")
 
-import numpy as np, pandas as pd, torch, rasterio, geopandas as gpd
+import numpy as np, pandas as pd, torch
 from torch.utils.data import DataLoader
 
-from src import config as C, datos as D, entrenamiento as E, inferencia as I
+from src import config as C, datos as D, entrenamiento as E, inferencia as I, preparacion as P
 
-EV = C.SALIDA / "evaluacion"
+EV = C.RESULTADOS / "evaluacion_datos"
 EV.mkdir(parents=True, exist_ok=True)
 DISP = "cuda" if torch.cuda.is_available() else "cpu"
 ENCODER = "mobilenet_v2"
 EPOCAS = 6                      # cada "época" = pasos de una época completa al 100 %
 FRACCIONES = [0.1, 0.25, 0.5, 1.0]
-BINS = np.arange(-30, 5.01, 0.5)
 if C.MAX_ITEMS_EVENTO:  # modo rápido
     EPOCAS, FRACCIONES = 1, [0.5, 1.0]
 
@@ -38,113 +36,6 @@ def log(*a):
     print(texto, flush=True)
     with open(EV / "evaluacion.log", "a", encoding="utf-8") as f:
         f.write(time.strftime("%H:%M:%S ") + texto + "\n")
-
-
-def auc(pos, neg):
-    """P(score_pos > score_neg) por histogramas (scores ya orientados)."""
-    if len(pos) == 0 or len(neg) == 0:
-        return np.nan
-    b = np.linspace(min(pos.min(), neg.min()), max(pos.max(), neg.max()) + 1e-6, 513)
-    hp, _ = np.histogram(pos, b); hn, _ = np.histogram(neg, b)
-    hp, hn = hp / hp.sum(), hn / hn.sum()
-    return float((hp * (np.cumsum(hn) - hn / 2)).sum())
-
-
-def hist(x):
-    h, _ = np.histogram(np.clip(x, -30, 5), BINS)
-    return h / max(h.sum(), 1)
-
-
-# ------------------------------------------------------------------ 1. inventario
-def etapa_inventario(items):
-    ruta_inv = C.SALIDA / "inventario.csv"
-    if ruta_inv.exists():
-        inv = pd.read_csv(ruta_inv)
-    else:
-        log("1. inventario de", len(items), "items")
-        inv = D.inventario(items)
-        inv.to_csv(ruta_inv, index=False)
-    tabla = (inv.groupby(["particion", "dataset", "evento"])
-             .agg(items=("item", "nunique"), ventanas=("i", "size"),
-                  ventanas_con_agua=("frac_agua", lambda x: (x > C.FRAC_AGUA_POSITIVO).sum()),
-                  agua_media=("frac_agua", "mean"), con_pre=("tiene_pre", "mean")).reset_index())
-    tabla.to_csv(EV / "1_inventario_por_evento.csv", index=False)
-    log("1. inventario listo:", len(inv), "ventanas")
-    return inv
-
-
-# ------------------------------------------------------------------ 2. radiometría
-def lima_tierra():
-    """VH de tierra (DEM > 1 m) en Lima 2017 y Lima Sur 2023, y si es oscura en ambas fechas."""
-    dem_rutas = sorted((C.DATOS / "test_lima" / "auxiliares" / "glo30_dem").glob("*.tif"))
-    out = {}
-    for nombre, post, pre in [("Lima 2017", "lima_2017_0317", "lima_2017_0305"), ("Lima Sur 2023", "lima_2023_0316", "lima_2023_0304")]:
-        x, perfil = I.leer_escena(C.LIMA / f"{post}.tif")
-        p = I.leer_en_grilla(C.LIMA / f"{pre}.tif", perfil)
-        dem = I.a_grilla(dem_rutas, perfil)
-        m = D.validos_db(x) & D.validos_db(p) & (dem > 1)
-        vh, vhp = x[1][m], p[1][m]
-        out[nombre] = dict(vh=vh[::7], oscuro=float((vh < -20).mean()), oscuro_ambas=float(((vh < -20) & (vhp < -20)).mean()),
-                           vh_mediana=float(np.median(vh)), dvh_p90abs=float(np.percentile(np.abs(vh - vhp), 90)))
-        del x, p, dem, m
-    return out
-
-
-def etapa_radiometria(items):
-    ruta_rad = EV / "2_radiometria_por_evento.csv"
-    if not ruta_rad.exists():
-        log("2. radiometría")
-        lima = lima_tierra()
-        h_lima = hist(lima["Lima Sur 2023"]["vh"])
-        filas = []
-        for (ds, ev), g in items.groupby(["dataset", "evento"]):
-            g = g.sample(min(len(g), 40), random_state=C.SEMILLA)
-            vh_a, vh_n, vhp_n, dvh_f, dvh_o = [], [], [], [], []
-            for it in g.itertuples():
-                pre, post, lab, val, val_pre = D.leer_item(ds, it.item)
-                vh = post[1]
-                vh_a.append(vh[val & (lab > 0)]); vh_n.append(vh[val & (lab == 0)])
-                if pre is not None:
-                    mp = val & val_pre
-                    vhp_n.append(np.stack([vh[mp & (lab == 0)], pre[1][mp & (lab == 0)]]))
-                    d = vh - pre[1]
-                    dvh_f.append(d[mp & (lab >= 2)]); dvh_o.append(d[mp & (lab < 2)])
-            a, n = np.concatenate(vh_a), np.concatenate(vh_n)
-            fila = dict(dataset=ds, evento=ev, items_muestreados=len(g), pix_agua=len(a), pix_no_agua=len(n),
-                        vh_mediana_agua=np.median(a) if len(a) else np.nan, vh_mediana_no_agua=np.median(n),
-                        auc_vh_agua=auc(-a, -n),
-                        tierra_oscura_pct=100 * (n < -20).mean(),
-                        similitud_lima_sur=float(np.minimum(hist(n), h_lima).sum()))
-            if vhp_n:
-                vp = np.concatenate(vhp_n, axis=1)
-                f, o = np.concatenate(dvh_f), np.concatenate(dvh_o)
-                fila.update(tierra_oscura_ambas_pct=100 * ((vp[0] < -20) & (vp[1] < -20)).mean(),
-                            dvh_mediana_inundacion=np.median(f) if len(f) else np.nan, dvh_mediana_resto=np.median(o),
-                            auc_dvh_inundacion=auc(-f, -o))
-            filas.append(fila)
-            log(f"   {ds}/{ev}: AUC VH {fila['auc_vh_agua']:.3f} · tierra oscura {fila['tierra_oscura_pct']:.1f} %")
-        rad = pd.DataFrame(filas)
-        for nombre, v in lima.items():
-            rad = pd.concat([rad, pd.DataFrame([dict(dataset="lima", evento=nombre, vh_mediana_no_agua=v["vh_mediana"],
-                                                     tierra_oscura_pct=100 * v["oscuro"], tierra_oscura_ambas_pct=100 * v["oscuro_ambas"],
-                                                     similitud_lima_sur=float(np.minimum(hist(v["vh"]), h_lima).sum()))])])
-        rad.to_csv(ruta_rad, index=False)
-    log("2. radiometría lista")
-
-
-# ------------------------------------------------------------------ 3. parches
-def etapa_parches(inv):
-    ruta_idx, ruta_stats = C.SALIDA / "indice.csv", C.SALIDA / "stats.json"
-    if not ruta_idx.exists():
-        log("3. extracción de parches")
-        indice = D.extraer_parches(D.muestrear(inv))
-        indice.to_csv(ruta_idx, index=False)
-    indice = pd.read_csv(ruta_idx)
-    if not ruta_stats.exists():
-        json.dump(D.estadisticas(indice), open(ruta_stats, "w"), indent=2)
-    stats = json.load(open(ruta_stats))
-    log("3. parches listos:", len(indice))
-    return indice, stats
 
 
 # ------------------------------------------------------------------ 4. experimentos
@@ -158,37 +49,32 @@ class PasosFijos(E.LotesBalanceados):
 
 
 def preparar_lima(stats):
-    """Entradas normalizadas de Lima guardadas en disco (memmap) para no saturar la RAM."""
+    """Entradas normalizadas de Lima (desde las escenas preparadas) guardadas como memmap para no saturar la RAM."""
     cache = EV / "cache"
     cache.mkdir(exist_ok=True)
     if not (cache / "meta.json").exists():
         meta = {}
-        gdb = C.EMSN038
-        agua_ems = pd.concat([gpd.read_file(gdb, layer=c) for c in ["Potential_Maximum_flood", "Riverbank"]])
-        zona = gpd.read_file(gdb, layer="EMSN038_AOI").overlay(gpd.read_file(gdb, layer="Footprints"), how="intersection")
-        dem_rutas = sorted((C.DATOS / "test_lima" / "auxiliares" / "glo30_dem").glob("*.tif"))
-        for clave, post, pre in [("l17", "lima_2017_0317", "lima_2017_0305"), ("l23", "lima_2023_0316", "lima_2023_0304")]:
-            x, perfil = I.leer_escena(C.LIMA / f"{post}.tif")
-            p = I.leer_en_grilla(C.LIMA / f"{pre}.tif", perfil)
+        for clave, nombre in [("l17", "lima_2017"), ("l23", "lima_2023")]:
+            capas, _ = P.cargar_escena(C.PRUEBAS / f"{nombre}.npz")
+            x, p = capas["post"], capas["pre"]
             v = D.validos_db(x) & D.validos_db(p)
-            capas = [p[0], p[1], x[0], x[1]]
+            entrada = [p[0], p[1], x[0], x[1]]
             for modo, cfg in C.MODOS.items():
                 out = np.lib.format.open_memmap(cache / f"{clave}_{modo}.npy", "w+", "float32", (len(cfg["canales"]),) + v.shape)
                 for k, c in enumerate(cfg["canales"]):
-                    out[k] = E.normalizar(capas[c][None], v, stats, [c])[0]
+                    out[k] = E.normalizar(entrada[c][None], v, stats, [c])[0]
                 out.flush(); del out
-            tierra = (I.a_grilla(dem_rutas, perfil) > 1) & v
+            tierra = (capas["dem"] > 1) & v
             np.save(cache / f"{clave}_tierra.npy", tierra)
             np.save(cache / f"{clave}_oscuro_ambas.npy", (x[1] < -20) & (p[1] < -20) & tierra)
-            np.save(cache / f"{clave}_hand.npy", I.a_grilla(C.HAND, perfil) < C.HAND_MAX)
+            np.save(cache / f"{clave}_hand.npy", capas["hand"] < C.HAND_MAX)
             if clave == "l17":
-                ref = I.rasterizar(agua_ems, perfil).astype("int8")
-                ref[I.rasterizar(zona, perfil) == 0] = -1
+                ref = capas["ref"].copy()
                 ref[~v] = -1
                 np.save(cache / "l17_ref.npy", ref)
                 meta["otsu_17"] = float(I.otsu(x[1][ref != -1]))
                 np.save(cache / "l17_otsu.npy", x[1] < meta["otsu_17"])
-            del x, p, v
+            del x, p, v, capas
         json.dump(meta, open(cache / "meta.json", "w"))
     return cache
 
@@ -218,9 +104,8 @@ def evaluar_externo(modelo, modo, cache, stats):
     r = {}
     if modo == "agua":
         cb = np.zeros(4)
-        for f in sorted((C.BOLIVIA / "S1Hand").glob("*_S1Hand.tif")):
-            post, _ = I.leer_escena(f)
-            ref = rasterio.open(C.BOLIVIA / "LabelHand" / f.name.replace("S1Hand", "LabelHand")).read(1)
+        bol = np.load(C.PRUEBAS / "bolivia.npz")
+        for post, ref in zip(bol["post"], bol["ref"]):
             prob, v = I.probabilidad(modelo, "agua", stats, post, None, DISP)
             m = v & (ref != -1)
             cb += E.conteos(prob[m] >= C.UMBRAL, ref[m] == 1)
@@ -284,10 +169,8 @@ def experimento(nombre, modo, train, val, cache, stats, pasos):
 
 
 def main():
-    items = D.listar_items()
-    inv = etapa_inventario(items)
-    etapa_radiometria(items)
-    indice, stats = etapa_parches(inv)
+    indice = pd.read_csv(C.PREPARADO / "indice.csv")
+    stats = json.load(open(C.PREPARADO / "stats.json"))
     cache = preparar_lima(stats)
     log("4. caché de Lima lista")
     resultados = []
@@ -297,9 +180,9 @@ def main():
         for frac in FRACCIONES:
             sub = train if frac == 1 else train.groupby("evento", group_keys=False).sample(frac=frac, random_state=C.SEMILLA)
             resultados.append(experimento(f"{modo}_frac{int(frac * 100):03d}", modo, sub.reset_index(drop=True), val, cache, stats, pasos))
-        for ds in sorted(train.dataset.unique()):
-            sub = train[train.dataset != ds].reset_index(drop=True)
-            resultados.append(experimento(f"{modo}_sin_{ds}", modo, sub, val, cache, stats, pasos))
+        for ev in sorted(train.evento.unique()):
+            sub = train[train.evento != ev].reset_index(drop=True)
+            resultados.append(experimento(f"{modo}_sin_{ev}", modo, sub, val, cache, stats, pasos))
     pd.DataFrame(resultados).to_csv(EV / "4_experimentos.csv", index=False)
     log("Umbral Otsu Lima 2017:", round(json.load(open(cache / "meta.json"))["otsu_17"], 1))
     log("FIN")

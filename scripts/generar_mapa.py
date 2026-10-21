@@ -1,13 +1,13 @@
 """Mapa web (HTML con Leaflet) de las detecciones de agua de Lima Sur 2023 sobre un mapa base.
 
-Lee los GeoTIFF que exporta la sección 11 del notebook (Data/procesado/predicciones/) y genera un único
+Lee los GeoTIFF que exporta la sección 11 del notebook (Data/procesado/resultados/predicciones/) y genera un único
 HTML autocontenido con las capas superpuestas:
   - agua (modo `agua`, 2 canales, filtrada con HAND y JRC)
   - inundación nueva (modo `cambio`, 4 canales) y un punto por cada mancha detectada
   - probabilidad de agua del modelo de 2 canales
   - distritos de Lima con el área detectada (lima_2023_por_distrito.csv)
 
-Uso:  python scripts/generar_mapa.py [--salida Data/procesado/mapa_agua_lima_2023.html]
+Uso:  python scripts/generar_mapa.py [--salida Data/procesado/resultados/mapa_agua_lima_2023.html]
 """
 import sys, io, json, base64, argparse, warnings
 from pathlib import Path
@@ -22,7 +22,7 @@ from scipy import ndimage
 
 from src import config as C
 
-PRED = C.SALIDA / "predicciones"
+PRED = C.RESULTADOS / "predicciones"
 ESCENA = "lima_2023_0316"
 WEB = "EPSG:3857"
 
@@ -90,9 +90,9 @@ def manchas_inundacion(ruta):
 def distritos(ruta_escena):
     with rasterio.open(ruta_escena) as s:
         b = s.bounds
-    d = gpd.read_file(C.EMSN038, layer="Admin_MINAM_BAS_LIM_DISTRITOS")
-    d = d[d.NOMBPROV == "LIMA"].cx[b.left:b.right, b.bottom:b.top]
-    res = pd.read_csv(C.SALIDA / "lima_2023_por_distrito.csv")
+    d = gpd.read_file(C.PRUEBAS / "distritos_lima.gpkg")
+    d = d.cx[b.left:b.right, b.bottom:b.top]
+    res = pd.read_csv(C.RESULTADOS / "lima_2023_por_distrito.csv")
     d = d[["NOMBDIST", "geometry"]].rename(columns={"NOMBDIST": "distrito"}).merge(res, on="distrito", how="inner")
     d["geometry"] = d.geometry.force_2d().simplify(25)
     d = d.rename(columns={"%_detectado": "pct_inundacion", "km2_detectados": "km2_inundacion"}).round(4)
@@ -101,7 +101,7 @@ def distritos(ruta_escena):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--salida", default=str(C.SALIDA / f"mapa_agua_{ESCENA.rsplit('_', 1)[0]}.html"))
+    ap.add_argument("--salida", default=str(C.RESULTADOS / f"mapa_agua_{ESCENA.rsplit('_', 1)[0]}.html"))
     a = ap.parse_args()
 
     agua_png, limites, agua = capa_mascara(PRED / f"{ESCENA}_agua.tif", (30, 136, 229, 215))

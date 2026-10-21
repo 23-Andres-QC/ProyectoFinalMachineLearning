@@ -44,7 +44,7 @@ const D = /*__DATOS__*/null;
 if (!D) {
   document.getElementById("mapa").innerHTML = `<div class="panel" style="margin:24px auto">
     <h1>Esta es solo la plantilla</h1><p>Genera el mapa con <code>python scripts/generar_mapa.py</code>
-    y abre <code>Data/procesado/mapa_agua_lima_2023.html</code>.</p></div>`;
+    y abre <code>Data/procesado/resultados/mapa_agua_lima_2023.html</code>.</p></div>`;
   throw new Error("plantilla sin datos");
 }
 const fmt = (x, d = 2) => x.toLocaleString("es-PE", { minimumFractionDigits: d, maximumFractionDigits: d });
