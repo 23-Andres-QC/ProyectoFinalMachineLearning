@@ -4,10 +4,12 @@ numpy
 pandas
 scipy
 rasterio
-geopandas
-pyogrio
+h5py
+pyproj
+shapely
 matplotlib
 tqdm
-jupyter
-asf_search
+scikit-learn
+joblib
 requests
+jupyter
