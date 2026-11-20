@@ -29,7 +29,7 @@ que deja el 01, y construye su propia tabla de píxeles.
 |---|---|
 | train | Lima, pista 083 (18:25): 14 ene (solo Lima Sur y Centro), 18 ago y 5 oct 2026 |
 | validación | Lima, pista 003 (05:58): 24 oct 2026 |
-| aplicación externa | Tumbes, pista 003 (06:01): 24 oct 2026 · Arequipa, pista 046 (05:32): 17 feb 2026 (no pasa la validación de datos; solo entra en la comparación con días secos) · Lima 5 nov 2026 cuando se publique |
+| aplicación externa | Tumbes, pista 003 (06:01): 24 oct 2026 · Arequipa, pista 046 (05:32): 17 feb 2026 (no pasa la validación de datos; solo entra en la comparación con días secos) · Lima 5 nov 2026 (aniegos del 4-5 nov, pista 003) |
 | referencia seca | Lima 083: 7 fechas · Lima 003: 5 fechas · Tumbes: 20 jul y 13 ago 2026 · Arequipa: 29 jun y 11 jul 2026 |
 
 Los días secos no se usan para entrenar: sirven para separar el agua de la lluvia de lo que ya parece agua cualquier día
@@ -94,5 +94,6 @@ Qué se logró y qué no, con los números de la última ejecución (el detalle 
 * **Límites.** Una sola polarización (HH); pasadas entre 13 h y 3 días después de la lluvia; en Lima los días de lluvia y
   los secos tienen casi la misma garúa (0-6 mm en los 3 días previos); Arequipa no tiene agua permanente para validar la
   etiqueta; la etiqueta sale del mismo radar, no de campo.
-* **Pendiente.** La pasada de Lima del 5 nov 2026 (horas después de los aniegos en Lima Sur) aún no está publicada en ASF.
-  Cuando salga, `descarga_datos.ipynb` la baja y basta volver a ejecutar 01 y 02.
+* **Lima 5 nov 2026.** La pasada ya está publicada y se usa como prueba externa: IoU 0.85 de la U-Net y 0.88 de Random Forest
+  en toda la escena; en la tierra a más de 200 m el IoU es 0.05 y 0.19. Marca 1.2 km² de agua de lluvia, pero en los
+  tres lugares con noticias de esa escena no aparece agua de lluvia.
