@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import Confirmar from '../components/Confirmar.vue'
+import Icono from '../components/Icono.vue'
 import { fechaHora } from '../formato'
 import { cargarSesion, sesion } from '../sesion'
 
@@ -16,6 +17,14 @@ const guardando = ref(false)
 const ROLES = { administrador: 'Administrador', evaluador: 'Evaluador' }
 
 const esYo = (u) => u.id === sesion.usuario?.id
+const iniciales = (nombre) =>
+  (nombre || '?')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0])
+    .join('')
+    .toLocaleUpperCase('es-PE')
 
 async function cargar() {
   try {
@@ -87,13 +96,15 @@ onMounted(cargar)
 <template>
   <div class="pagina">
     <div class="encabezado">
-      <h1>Usuarios</h1>
-      <button type="button" class="boton" @click="abrir()">Nuevo usuario</button>
+      <div>
+        <h1>Usuarios</h1>
+        <p class="subtitulo">
+          El <strong>administrador</strong> gestiona usuarios y ve todas las evaluaciones. El <strong>evaluador</strong> evalúa y
+          ve solo las suyas.
+        </p>
+      </div>
+      <button type="button" class="boton" @click="abrir()"><Icono nombre="mas" /> Nuevo usuario</button>
     </div>
-    <p class="ayuda">
-      El <strong>administrador</strong> gestiona usuarios y ve todas las evaluaciones. El <strong>evaluador</strong> evalúa y ve
-      solo las suyas.
-    </p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="cargando" class="tenue">Cargando…</p>
     <div v-else class="tabla-contenedor">
@@ -111,7 +122,12 @@ onMounted(cargar)
         </thead>
         <tbody>
           <tr v-for="u in usuarios" :key="u.id">
-            <td>{{ u.nombre }} <span v-if="esYo(u)" class="tenue">(tú)</span></td>
+            <td>
+              <span class="persona">
+                <span class="avatar" :class="{ apagado: !u.activo }" aria-hidden="true">{{ iniciales(u.nombre) }}</span>
+                <span>{{ u.nombre }} <span v-if="esYo(u)" class="tenue">(tú)</span></span>
+              </span>
+            </td>
             <td>{{ u.email }}</td>
             <td><span class="etiqueta">{{ ROLES[u.rol] }}</span></td>
             <td><span class="estado" :class="u.activo ? 'completado' : 'error'">{{ u.activo ? 'Activo' : 'Inactivo' }}</span></td>

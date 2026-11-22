@@ -9,7 +9,9 @@ export class ErrorApi extends Error {
 // llegan como {"error": "..."}. Un 401 fuera de /auth avisa a la app para volver al login.
 export async function api(ruta, { metodo = 'GET', datos } = {}) {
   const opciones = { method: metodo, headers: {}, credentials: 'same-origin' }
-  if (datos !== undefined) {
+  if (datos instanceof FormData) {
+    opciones.body = datos
+  } else if (datos !== undefined) {
     opciones.headers['Content-Type'] = 'application/json'
     opciones.body = JSON.stringify(datos)
   }

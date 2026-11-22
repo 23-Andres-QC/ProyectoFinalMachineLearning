@@ -6,7 +6,6 @@ import 'leaflet/dist/leaflet.css'
 import { api } from '../api'
 import Confirmar from '../components/Confirmar.vue'
 import { ESTADOS, area, fechaCorta, hoyEn, mm } from '../formato'
-import { sesion } from '../sesion'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,6 +31,10 @@ const historial = shallowRef([])
 const errorHistorial = ref('')
 const charcoElegido = ref(null)
 const zoom = ref(5)
+// Evaluaciones del historial dibujadas en el mapa: al entrar ninguna, solo las que la persona pide ver
+const visibles = shallowRef(new Set())
+const lugarMarcado = ref('')
+const avisoLimpio = ref('')
 
 // Desde este zoom se dibuja cada charco; más lejos, cada evaluación es un marcador con su número de charcos.
 // Desde ZOOM_SIN_PUNTOS los polígonos ya se ven solos y se quitan los puntos que los marcan.
@@ -47,13 +50,12 @@ const ESTILO_AREA = {
 }
 
 // Los objetos de Leaflet quedan fuera de la reactividad de Vue
-let mapa, rectangulo, capaResultado, capaFoco, esquina, sondeo, sondeoHistorial
+let mapa, rectangulo, capaResultado, capaFoco, esquina, sondeo, sondeoHistorial, pin
 let capaAreas, capaCharcos, capaPuntos, capaResumen
 let pedidoEvaluacion = 0
 let pedidoHistorial = 0
 let vivo = true
 
-const esAdmin = computed(() => sesion.usuario?.rol === 'administrador')
 const zona = computed(() => salud.value?.zona_horaria || 'America/Lima')
 const hoy = computed(() => hoyEn(zona.value))
 const maxArea = computed(() => salud.value?.max_area_km2 || 150)
@@ -99,22 +101,21 @@ const charcosAbiertos = computed(() =>
     .map((f) => ({ charco: f.properties.charco, area_m2: f.properties.area_m2, geometria: f.geometry }))
     .sort((a, b) => b.area_m2 - a.area_m2),
 )
-const recientes = computed(() => historial.value.slice(0, 8))
-const totales = computed(() => {
-  const hechas = historial.value.filter((h) => h.estado === 'completado')
-  return {
-    charcos: hechas.reduce((s, h) => s + (h.charcos || 0), 0),
-    agua: hechas.reduce((s, h) => s + (h.area_agua_m2 || 0), 0),
-  }
-})
+const dibujadas = computed(() => historial.value.filter((h) => visibles.value.has(h.id)))
+const abiertaVisible = computed(() => !!evaluacion.value && visibles.value.has(evaluacion.value.id))
+const charcosDibujados = computed(
+  () => dibujadas.value.reduce((s, h) => s + (h.charcos || 0), 0) || (abiertaVisible.value ? charcosAbiertos.value.length : 0),
+)
 const leyenda = computed(() => {
-  const estados = new Set(historial.value.map((h) => h.estado))
+  const estados = new Set(dibujadas.value.map((h) => h.estado))
+  if (abiertaVisible.value) estados.add(evaluacion.value.estado)
   const items = []
-  if (totales.value.charcos || charcosAbiertos.value.length) items.push({ clase: 'charco', texto: 'Agua de lluvia empozada' })
+  if (charcosDibujados.value) items.push({ clase: 'charco', texto: 'Agua de lluvia empozada' })
   if (estados.has('completado')) items.push({ clase: 'evaluada', texto: 'Área evaluada' })
   if (EN_CURSO.some((e) => estados.has(e))) items.push({ clase: 'en-curso', texto: 'En proceso' })
   if (estados.has('error')) items.push({ clase: 'fallida', texto: 'Con error' })
   if (bbox.value) items.push({ clase: 'caja', texto: 'Área seleccionada' })
+  if (lugarMarcado.value) items.push({ clase: 'pin', texto: lugarMarcado.value })
   return items
 })
 
@@ -166,12 +167,25 @@ onMounted(async () => {
   const [estado] = await Promise.allSettled([api('/salud'), cargarHistorial()])
   if (!vivo) return
   salud.value = estado.status === 'fulfilled' ? estado.value : null
-  const { id, lat, lon, fecha: dia, lugar } = route.query
-  if (id) abrirEvaluacion(id)
-  else if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon)) && lat && lon) {
-    usarPunto(Number(lat), Number(lon), /^\d{4}-\d{2}-\d{2}$/.test(dia || '') ? dia : '', typeof lugar === 'string' ? lugar : '')
+  // Al entrar no se dibuja nada del historial. Solo se dibuja lo que se pide: ?id viene de «Ver en el mapa» en Evaluaciones
+  // y ?todas de «Ver todas en el mapa»; ?seguir es una evaluación recién enviada, que se sigue en el panel sin dibujarla
+  const { id, seguir, todas, lat, lon, fecha: dia, lugar, ir } = route.query
+  const numero = (v) => (typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null)
+  const diaValido = /^\d{4}-\d{2}-\d{2}$/.test(dia || '') ? dia : ''
+  const nombreLugar = typeof lugar === 'string' ? lugar.slice(0, 120) : ''
+  if (numero(id)) {
+    visibles.value = new Set([numero(id)])
+    pintarHistorial()
+    abrirEvaluacion(numero(id))
+  } else if (numero(seguir)) abrirEvaluacion(numero(seguir))
+  else if (todas !== undefined) {
+    mostrarEnMapa(historial.value.map((h) => h.id))
     router.replace({ query: {} })
-  } else verHistorial()
+  } else if (lat && lon && Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+    if (ir) marcarLugar(Number(lat), Number(lon), nombreLugar, diaValido)
+    else usarPunto(Number(lat), Number(lon), diaValido, nombreLugar)
+    router.replace({ query: {} })
+  }
 })
 
 onBeforeUnmount(() => {
@@ -197,7 +211,28 @@ function usarPunto(lat, lon, dia, lugar) {
   }
 }
 
-// --- Historial: todo lo procesado queda en la base de datos y se dibuja en el mapa al entrar ---
+// «Ir al lugar» desde Lluvias: acerca el mapa y deja un pin, sin área ni búsqueda
+function marcarLugar(lat, lon, lugar, dia) {
+  quitarPin()
+  lugarMarcado.value = lugar || 'Lugar elegido'
+  pin = L.marker([lat, lon], {
+    icon: L.divIcon({ className: 'pin-lugar', html: '<b></b>', iconSize: [0, 0] }),
+    keyboard: false,
+    interactive: false,
+  })
+    .bindTooltip(contenido(lugarMarcado.value), { permanent: true, direction: 'top', offset: [0, -34] })
+    .addTo(mapa)
+  mapa.setView([lat, lon], 14)
+  if (dia && dia >= '2025-07-30') fecha.value = dia
+}
+
+function quitarPin() {
+  pin?.remove()
+  pin = null
+  lugarMarcado.value = ''
+}
+
+// --- Historial: todo lo procesado queda en la base de datos; en el mapa solo se dibuja lo que se elige ver ---
 
 async function cargarHistorial() {
   clearTimeout(sondeoHistorial)
@@ -219,6 +254,7 @@ function pintarHistorial() {
   for (const capa of [capaAreas, capaCharcos, capaPuntos, capaResumen]) capa.clearLayers()
   // Del más antiguo al más reciente, para que lo último evaluado quede encima
   for (const h of [...historial.value].reverse()) {
+    if (!visibles.value.has(h.id)) continue
     const limites = limitesDe(h.bbox)
     // El área ya está a la vista: se abre sin mover el mapa. El marcador (mapa lejos) además acerca hasta el área.
     L.rectangle(limites, { pane: 'hs-areas', ...ESTILO_AREA[EN_CURSO.includes(h.estado) ? 'en_curso' : h.estado] })
@@ -248,7 +284,42 @@ function pintarHistorial() {
         .addTo(capaPuntos)
     }
   }
-  if (evaluacion.value && historial.value.some((h) => h.id === evaluacion.value.id)) quitarResultado()
+  // Respaldo: la evaluación abierta y pedida en el mapa que todavía no llegó en el historial
+  const e = evaluacion.value
+  if (e && visibles.value.has(e.id) && e.estado === 'completado' && !historial.value.some((h) => h.id === e.id)) mostrarResultado(e.resultado)
+  else quitarResultado()
+}
+
+// Dibuja solo estas evaluaciones del historial y encuadra el mapa en ellas
+function mostrarEnMapa(ids, { encuadrar = true } = {}) {
+  avisoLimpio.value = ''
+  visibles.value = new Set(ids)
+  pintarHistorial()
+  if (!encuadrar) return
+  const limites = L.latLngBounds([])
+  for (const h of historial.value) if (visibles.value.has(h.id)) limites.extend(limitesDe(h.bbox))
+  if (!limites.isValid() && evaluacion.value && visibles.value.has(evaluacion.value.id)) limites.extend(limitesDe(evaluacion.value.bbox))
+  if (limites.isValid()) mapa.fitBounds(limites, { padding: [40, 40], maxZoom: 15 })
+}
+
+// La evaluación abierta en el panel pasa a dibujarse cuando la persona pide verla (botón o lista de charcos)
+function dibujarAbierta() {
+  const e = evaluacion.value
+  if (!e) return
+  avisoLimpio.value = ''
+  if (!visibles.value.has(e.id)) {
+    visibles.value = new Set([e.id])
+    pintarHistorial()
+  }
+  if (route.query.id !== String(e.id)) router.replace({ query: { id: e.id } })
+}
+
+function verAbiertaEnMapa() {
+  if (charcosAbiertos.value.length) verCharcos()
+  else if (evaluacion.value) {
+    dibujarAbierta()
+    mapa.fitBounds(limitesDe(evaluacion.value.bbox), { padding: [30, 30] })
+  }
 }
 
 function ajustarAlZoom() {
@@ -292,16 +363,18 @@ function iconoEvaluacion(h) {
   })
 }
 
-function verHistorial() {
-  const limites = L.latLngBounds([])
-  for (const h of historial.value) limites.extend(limitesDe(h.bbox))
-  if (limites.isValid()) mapa.fitBounds(limites, { padding: [40, 40], maxZoom: 13 })
-}
-
+// Clic en una evaluación dibujada en el mapa: la abre en el panel.
+// Si ya estaba a la vista (por ejemplo, con «Ver todas en el mapa» de Evaluaciones), lo demás sigue dibujado.
 async function abrir(id, { encuadrar = true } = {}) {
   if (dibujando.value) cancelarDibujo()
   error.value = ''
+  avisoLimpio.value = ''
+  if (!visibles.value.has(id)) {
+    visibles.value = new Set([id])
+    pintarHistorial()
+  }
   if (evaluacion.value?.id === id) {
+    if (route.query.id !== String(id)) router.replace({ query: { id } })
     if (encuadrar) mapa.fitBounds(limitesDe(evaluacion.value.bbox), { padding: [30, 30] })
     return
   }
@@ -315,6 +388,7 @@ async function elegirCharco(h, c) {
 }
 
 function acercarA(c) {
+  dibujarAbierta()
   quitarFoco()
   charcoElegido.value = c.charco
   capaFoco = L.geoJSON(c.geometria, {
@@ -326,6 +400,7 @@ function acercarA(c) {
 }
 
 function verCharcos() {
+  dibujarAbierta()
   const limites = L.latLngBounds([])
   for (const c of charcosAbiertos.value) limites.extend(L.geoJSON(c.geometria).getBounds())
   if (limites.isValid()) mapa.fitBounds(limites, { padding: [60, 60], maxZoom: 17 })
@@ -342,6 +417,7 @@ function quitarFoco() {
 function empezarDibujo() {
   reiniciarEvaluacion()
   error.value = ''
+  avisoLimpio.value = ''
   lugarSugerido.value = ''
   dibujando.value = true
   esquina = null
@@ -453,8 +529,9 @@ async function evaluar() {
       datos: { busqueda_id: busqueda.value.busqueda_id, indice: indice.value },
     })
     busqueda.value = null
-    router.replace({ query: { id } })
-    await abrirEvaluacion(id)
+    // La evaluación nueva se sigue en el panel; en el mapa se dibuja solo si la persona lo pide
+    router.replace({ query: { seguir: id } })
+    await abrirEvaluacion(id, { encuadrar: false })
   } catch (e) {
     error.value = e.message
     if (e.estado === 410) busqueda.value = null
@@ -484,9 +561,9 @@ async function abrirEvaluacion(id, { encuadrar = true } = {}) {
     }
     // Una evaluación nueva, reintentada o recién terminada todavía no está así en el historial: se recarga
     if (historial.value.find((h) => h.id === e.id)?.estado !== e.estado) await cargarHistorial()
+    else if (visibles.value.has(e.id) && !historial.value.some((h) => h.id === e.id)) pintarHistorial()
     if (!vivo || pedido !== pedidoEvaluacion) return
-    if (e.estado === 'completado' && !historial.value.some((h) => h.id === e.id)) mostrarResultado(e.resultado)
-    if (terminoAhora && charcosAbiertos.value.length) verCharcos()
+    if (terminoAhora && visibles.value.has(e.id) && charcosAbiertos.value.length) verCharcos()
     if (EN_CURSO.includes(e.estado)) sondeo = setTimeout(() => abrirEvaluacion(e.id), 5000)
   } catch (err) {
     if (vivo && pedido === pedidoEvaluacion) error.value = err.message
@@ -528,15 +605,51 @@ function reiniciarEvaluacion() {
   evaluacion.value = null
   quitarResultado()
   quitarFoco()
-  if (route.query.id) router.replace({ query: {} })
+  if (route.query.id || route.query.seguir) router.replace({ query: {} })
+}
+
+// «Limpiar»: la evaluación ya está guardada en la base; se despeja el panel y el mapa para evaluar otra zona
+function limpiar() {
+  const id = evaluacion.value?.id
+  const enProceso = enCurso.value
+  if (dibujando.value) cancelarDibujo()
+  reiniciarEvaluacion()
+  bbox.value = null
+  busqueda.value = null
+  rectangulo?.remove()
+  rectangulo = null
+  lugares.value = null
+  textoLugar.value = ''
+  lugarSugerido.value = ''
+  error.value = ''
+  quitarPin()
+  visibles.value = new Set()
+  pintarHistorial()
+  avisoLimpio.value = id
+    ? `La evaluación #${id} quedó guardada en Evaluaciones${enProceso ? ' y sigue procesándose' : ''}. Ya puedes evaluar otra zona.`
+    : 'Mapa limpio. Ya puedes evaluar otra zona.'
 }
 </script>
 
 <template>
   <div class="mapa-vista">
     <aside class="panel">
+      <p v-if="avisoLimpio" class="aviso exito" role="status">{{ avisoLimpio }}</p>
       <section class="paso">
-        <h2><span class="numero">1</span> Área a evaluar</h2>
+        <div class="titulo-fila">
+          <h2><span class="numero">1</span> Área a evaluar</h2>
+          <button
+            v-if="!evaluacion && (bbox || lugarMarcado || visibles.size)"
+            type="button"
+            class="boton-texto"
+            @click="limpiar"
+          >
+            Limpiar mapa
+          </button>
+        </div>
+        <p v-if="lugarMarcado" class="ayuda resaltada">
+          El pin marca {{ lugarMarcado }}. Dibuja el área alrededor y busca la pasada de NISAR.
+        </p>
         <form class="fila" role="search" @submit.prevent="buscarLugar">
           <input v-model="textoLugar" type="search" placeholder="Buscar ciudad o lugar" aria-label="Buscar ciudad o lugar">
           <button class="boton secundario" :disabled="buscandoLugar">Ir</button>
@@ -621,8 +734,8 @@ function reiniciarEvaluacion() {
         </p>
         <p v-if="evaluacion.estado === 'en_cola'" class="ayuda">Esperando turno: se procesa una evaluación a la vez.</p>
         <p v-if="evaluacion.estado === 'procesando'" class="ayuda">
-          Descargando el recorte de NISAR y segmentando. Puede tardar varios minutos. Si sales, el resultado igual queda guardado y
-          aparece en el mapa.
+          Descargando el recorte de NISAR y segmentando. Puede tardar varios minutos. Si sales o limpias, el resultado igual queda
+          guardado en Evaluaciones.
         </p>
         <template v-if="evaluacion.estado === 'error'">
           <p class="error">{{ evaluacion.mensaje }}</p>
@@ -665,48 +778,24 @@ function reiniciarEvaluacion() {
           </div>
           <p v-if="evaluacion.charcos" class="ayuda">El KML se abre en Google Earth o se importa en Google My Maps.</p>
         </template>
-        <button type="button" class="boton-texto" @click="reiniciarEvaluacion">Cerrar evaluación</button>
+        <div class="acciones-evaluacion">
+          <button v-if="!abiertaVisible" type="button" class="boton secundario" @click="verAbiertaEnMapa">Ver en el mapa</button>
+          <button type="button" class="boton" @click="limpiar">Limpiar y evaluar otra zona</button>
+        </div>
+        <p class="ayuda">
+          {{ abiertaVisible ? 'Dibujada en el mapa.' : 'No se dibuja en el mapa hasta que lo pidas.' }} Al limpiar, la evaluación queda
+          guardada en Evaluaciones.
+        </p>
       </section>
 
-      <section class="paso">
-        <div class="titulo-fila">
-          <h2>Historial guardado</h2>
-          <button v-if="historial.length" type="button" class="boton-texto" @click="verHistorial">Ver todo en el mapa</button>
-        </div>
-        <p v-if="errorHistorial" class="error">{{ errorHistorial }}</p>
-        <p v-else-if="!historial.length" class="ayuda">
-          Aún no hay evaluaciones. Todo lo que proceses queda guardado aquí y dibujado en el mapa.
-        </p>
-        <template v-if="historial.length">
-          <p class="dato">
-            {{ historial.length }} {{ historial.length === 1 ? 'evaluación' : 'evaluaciones' }} · {{ nCharcos(totales.charcos) }} ·
-            {{ area(totales.agua) }} de agua
-          </p>
-          <ul class="lista-mapa">
-            <li v-for="h in recientes" :key="h.id">
-              <button type="button" :class="{ elegido: h.id === evaluacion?.id }" @click="abrir(h.id)">
-                <span>
-                  #{{ h.id }} · lluvia {{ fechaCorta(h.fecha_lluvia) }}<template v-if="esAdmin"> · {{ h.usuario }}</template>
-                </span>
-                <span class="estado" :class="h.estado">
-                  {{ h.estado === 'completado' ? nCharcos(h.charcos) : ESTADOS[h.estado] }}
-                </span>
-              </button>
-            </li>
-          </ul>
-          <RouterLink v-if="historial.length > recientes.length" to="/evaluaciones" class="ayuda">
-            Ver las {{ historial.length }} evaluaciones
-          </RouterLink>
-          <p class="ayuda">Se guarda en la base de datos: lo verás cada vez que entres.</p>
-        </template>
-      </section>
+      <p v-if="errorHistorial" class="error">{{ errorHistorial }}</p>
     </aside>
 
     <div class="mapa-contenedor" :class="{ dibujando }">
       <div ref="contenedor" class="mapa"></div>
       <div v-if="leyenda.length" class="leyenda">
         <span v-for="i in leyenda" :key="i.clase"><i class="muestra" :class="i.clase"></i> {{ i.texto }}</span>
-        <span v-if="zoom < ZOOM_CHARCOS && totales.charcos" class="pista-zoom">
+        <span v-if="zoom < ZOOM_CHARCOS && dibujadas.some((h) => h.charcos)" class="pista-zoom">
           El número indica los charcos. Acerca el mapa para verlos.
         </span>
       </div>
