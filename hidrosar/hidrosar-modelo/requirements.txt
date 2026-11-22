@@ -1,0 +1,10 @@
+segmentation-models-pytorch==0.5.0
+numpy
+scipy
+h5py
+rasterio
+pyproj
+shapely>=2.0
+requests
+fastapi
+uvicorn

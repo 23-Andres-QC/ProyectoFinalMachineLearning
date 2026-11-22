@@ -1,0 +1,64 @@
+name: hidrosar
+
+services:
+  db:
+    image: postgis/postgis:17-3.5-alpine
+    container_name: hidrosar-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hidrosar
+      POSTGRES_USER: hidrosar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
+    volumes:
+      - hidrosar-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hidrosar -d hidrosar"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  modelo:
+    build: ./hidrosar-modelo
+    image: hidrosar-modelo
+    container_name: hidrosar-modelo
+    restart: unless-stopped
+    environment:
+      EARTHDATA_USER: ${EARTHDATA_USER:-}
+      EARTHDATA_PASSWORD: ${EARTHDATA_PASSWORD:-}
+      MODELO_PT: /modelos/${MODELO_PT:-unet_resnet34.pt}
+    volumes:
+      - ./hidrosar-modelo/modelos:/modelos:ro
+
+  backend:
+    build: ./hidrosar-backend
+    image: hidrosar-backend
+    container_name: hidrosar-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://hidrosar:${POSTGRES_PASSWORD}@db:5432/hidrosar?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?Falta JWT_SECRET en .env}
+      ADMIN_NOMBRE: ${ADMIN_NOMBRE:-Administrador}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?Falta ADMIN_EMAIL en .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Falta ADMIN_PASSWORD en .env}
+      MODELO_URL: http://modelo:8000
+      ZONA_HORARIA: ${ZONA_HORARIA:-America/Lima}
+      MAX_AREA_KM2: ${MAX_AREA_KM2:-150}
+      COOKIE_SEGURA: ${COOKIE_SEGURA:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+      modelo:
+        condition: service_started
+
+  web:
+    build: ./hidrosar-web
+    image: hidrosar-web
+    container_name: hidrosar-web
+    restart: unless-stopped
+    ports:
+      - "${PUERTO_WEB:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  hidrosar-db:

@@ -1,0 +1,4 @@
+# Los modelos y sus umbrales son locales (salen de Kaggle); en git solo queda el LEEME
+*
+!.gitignore
+!LEEME.md
