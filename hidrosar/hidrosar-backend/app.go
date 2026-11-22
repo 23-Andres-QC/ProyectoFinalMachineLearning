@@ -52,6 +52,9 @@ func (a *App) rutas() http.Handler {
 	m.Handle("POST /api/nisar/buscar", a.conSesion(a.buscarNisar))
 	m.Handle("GET /api/lluvias/regiones", a.conSesion(a.listarRegiones))
 	m.Handle("GET /api/lluvias", a.conSesion(a.listarLluvias))
+	m.Handle("GET /api/lluvias/senamhi", a.conSesion(a.listarLluviasSenamhi))
+	m.Handle("GET /api/lluvias/senamhi/estaciones", a.conSesion(a.listarEstacionesSenamhi))
+	m.Handle("POST /api/lluvias/senamhi/tablas", a.soloAdmin(a.subirSenamhi))
 
 	m.Handle("GET /api/historial", a.conSesion(a.listarHistorial))
 	m.Handle("GET /api/evaluaciones", a.conSesion(a.listarEvaluaciones))

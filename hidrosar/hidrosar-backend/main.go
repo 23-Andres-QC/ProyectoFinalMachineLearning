@@ -31,6 +31,12 @@ func main() {
 	if err := crearAdminInicial(ctx, db, cfg); err != nil {
 		log.Fatalf("administrador inicial: %v", err)
 	}
+	if len(os.Args) > 2 && os.Args[1] == "importar-senamhi" {
+		if err := importarCarpetaSenamhi(ctx, db, os.Args[2:]); err != nil {
+			log.Fatalf("importar Senamhi: %v", err)
+		}
+		return
+	}
 
 	app := nuevaApp(cfg, db)
 	go app.procesarCola(ctx)
