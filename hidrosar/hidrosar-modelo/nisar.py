@@ -32,6 +32,7 @@ def preparar_credenciales():
 class Remoto(io.RawIOBase):
     def __init__(self, url):
         self.sesion, self.pos, self.bajado = requests.Session(), 0, 0
+        self.al_leer = None  # avisa cuántos bytes van, para mostrar la descarga en vivo
         r = self._pedir(url, "bytes=0-0")
         self.url, self.n = r.url, int(r.headers["Content-Range"].split("/")[1])
 
@@ -69,11 +70,14 @@ class Remoto(io.RawIOBase):
         b[:len(r.content)] = r.content
         self.pos += len(r.content)
         self.bajado += len(r.content)
+        if self.al_leer:
+            self.al_leer(self.bajado)
         return len(r.content)
 
 
-def geocodificar(urls, bbox, dem, g):
-    """HH (dB, sigma0 calibrado y sin ruido) de una pasada en la grilla g; la pasada puede venir en varios cuadros."""
+def geocodificar(urls, bbox, dem, g, al_bajar=None):
+    """HH (dB, sigma0 calibrado y sin ruido) de una pasada en la grilla g; la pasada puede venir en varios cuadros.
+    al_bajar(mb) recibe los MB descargados de la pasada mientras se leen."""
     o, s, e, n = bbox
     alto, ancho = dem.shape
     cc, ff = np.meshgrid(np.arange(0, ancho, 10), np.arange(0, alto, 10))
@@ -84,6 +88,8 @@ def geocodificar(urls, bbox, dem, g):
     bajado = 0
     for url in urls:
         remoto = Remoto(url)
+        if al_bajar:
+            remoto.al_leer = lambda b, previo=bajado: al_bajar((previo + b) / 1e6)
         with h5py.File(io.BufferedReader(remoto, 1 << 22), "r") as f:
             geo, sw = f["science/LSAR/RSLC/metadata/geolocationGrid"], f["science/LSAR/RSLC/swaths"]
             t, r = sw["zeroDopplerTime"][()], sw["frequencyA/slantRange"][()]

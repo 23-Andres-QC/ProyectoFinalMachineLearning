@@ -24,6 +24,7 @@
   --peligro: #c42b2b;
   --peligro-suave: #fdeaea;
   --charco: #ff2d55;
+  --agua: #1f6fff;
   --charco-marca: #d0103a;
   --caja: #ffd60a;
   --evaluada: #3ec7e6;
@@ -1097,6 +1098,136 @@ kbd {
   }
 }
 
+/* --- Pasos de una evaluación (descargas, segmentación, polígonos) --- */
+
+.pasos-proceso {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+
+.pasos-proceso li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+
+/* línea que une los pasos */
+.pasos-proceso li:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 25px;
+  bottom: -5px;
+  width: 2px;
+  background: var(--borde);
+}
+
+.pasos-proceso li.hecho:not(:last-child)::before {
+  background: color-mix(in srgb, var(--exito) 45%, var(--borde));
+}
+
+.pasos-proceso li.pendiente {
+  color: var(--tenue);
+}
+
+.pasos-proceso li.en_curso .texto-paso > span {
+  font-weight: 600;
+}
+
+.pasos-proceso li.error {
+  color: var(--peligro);
+}
+
+.texto-paso {
+  display: grid;
+  gap: 1px;
+}
+
+.texto-paso small,
+.tiempo-paso {
+  font-size: 0.8rem;
+  color: var(--tenue);
+  font-variant-numeric: tabular-nums;
+}
+
+.tiempo-paso {
+  padding-top: 1px;
+  white-space: nowrap;
+}
+
+.marca-paso {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 2px solid var(--borde-fuerte);
+  background: var(--superficie);
+}
+
+.hecho .marca-paso {
+  border-color: var(--exito);
+  background: var(--exito);
+}
+
+/* palomita */
+.hecho .marca-paso::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--superficie);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.en_curso .marca-paso {
+  border-color: var(--acento);
+  border-right-color: transparent;
+  animation: girar 0.8s linear infinite;
+}
+
+.error .marca-paso {
+  border-color: var(--peligro);
+  background: var(--peligro);
+}
+
+.error .marca-paso::after {
+  content: '!';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--superficie);
+}
+
+.detalle-pasos summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--tenue);
+}
+
+.detalle-pasos[open] summary {
+  margin-bottom: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .en_curso .marca-paso {
+    animation-duration: 3s;
+  }
+}
+
 /* --- Diálogos --- */
 
 .dialogo {
@@ -1619,6 +1750,36 @@ kbd {
   box-shadow: 0 4px 10px -4px rgb(22 82 192 / 0.7);
 }
 
+/* Selector del modelo, arriba del panel */
+.campo-modelo {
+  display: grid;
+  gap: 10px;
+}
+
+.titulo-modelo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
+.numero-icono {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #14b8a6, #0f766e);
+  color: #fff;
+  box-shadow: 0 4px 10px -4px rgb(15 118 110 / 0.7);
+}
+
+.campo-modelo select {
+  width: 100%;
+}
+
 .lugares {
   list-style: none;
   margin: 0;
@@ -1863,6 +2024,17 @@ kbd {
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.3);
 }
 
+.muestra.agua {
+  background: color-mix(in srgb, var(--agua) 55%, transparent);
+  border: 1.5px solid var(--agua);
+}
+
+.dato.con-muestra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .muestra.evaluada {
   border: 2px solid var(--evaluada);
 }
@@ -2073,6 +2245,17 @@ kbd {
 }
 
 .tabla th,
+.tabla td .etapa-fila {
+  max-width: 15rem;
+  margin-top: 4px;
+  white-space: normal;
+}
+
+.tabla td .dos-lineas:has(.etapa-fila) {
+  justify-items: start;
+  gap: 2px;
+}
+
 .tabla td {
   padding: 12px 14px;
   text-align: left;

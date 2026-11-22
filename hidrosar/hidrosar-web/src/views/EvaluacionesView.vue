@@ -5,6 +5,7 @@ import { avisar } from '../avisos'
 import Confirmar from '../components/Confirmar.vue'
 import Icono from '../components/Icono.vue'
 import { ESTADOS, area, fechaCorta, fechaHora } from '../formato'
+import { cargarCatalogo, nombreModelo } from '../modelos'
 import { sesion } from '../sesion'
 
 const lista = ref([])
@@ -45,7 +46,9 @@ const filas = computed(() => {
     if (filtro.estado === 'en_curso' ? !EN_CURSO.includes(e.estado) : filtro.estado && e.estado !== filtro.estado) return false
     if (filtro.soloAgua && !e.charcos) return false
     if (!q) return true
-    return [String(e.id), e.usuario, e.fecha_lluvia, fechaCorta(e.fecha_lluvia), String(e.pista)].some((v) => (v || '').toLowerCase().includes(q))
+    return [String(e.id), e.usuario, e.fecha_lluvia, fechaCorta(e.fecha_lluvia), String(e.pista), nombreModelo(e.modelo)].some((v) =>
+      (v || '').toLowerCase().includes(q),
+    )
   })
   const { campo, descendente } = orden
   salida = [...salida].sort((a, b) => {
@@ -77,7 +80,7 @@ async function cargar() {
   } finally {
     cargando.value = false
   }
-  if (lista.value.some((e) => EN_CURSO.includes(e.estado))) sondeo = setTimeout(cargar, 8000)
+  if (lista.value.some((e) => EN_CURSO.includes(e.estado))) sondeo = setTimeout(cargar, lista.value.some((e) => e.estado === 'procesando') ? 4000 : 8000)
 }
 
 async function reintentar(e) {
@@ -109,13 +112,13 @@ async function eliminar(e) {
 
 // CSV de lo que se ve en la tabla (con los filtros aplicados), con BOM para que Excel lea bien las tildes
 function exportarCsv() {
-  const cabecera = ['id', 'fecha_lluvia', 'pasada_hora_local', 'pista', 'usuario', 'estado', 'charcos', 'agua_m2', 'creada', 'oeste', 'sur', 'este', 'norte']
+  const cabecera = ['id', 'fecha_lluvia', 'pasada_hora_local', 'pista', 'modelo', 'usuario', 'estado', 'charcos', 'agua_m2', 'creada', 'oeste', 'sur', 'este', 'norte']
   const celda = (v) => {
     const t = v == null ? '' : String(v)
     return /[",;\n]/.test(t) ? `"${t.replaceAll('"', '""')}"` : t
   }
   const lineas = filas.value.map((e) =>
-    [e.id, e.fecha_lluvia, e.hora_pasada, e.pista, e.usuario, e.estado, e.charcos, e.area_agua_m2 == null ? '' : Math.round(e.area_agua_m2), e.creado, ...e.bbox]
+    [e.id, e.fecha_lluvia, e.hora_pasada, e.pista, nombreModelo(e.modelo), e.usuario, e.estado, e.charcos, e.area_agua_m2 == null ? '' : Math.round(e.area_agua_m2), e.creado, ...e.bbox]
       .map(celda)
       .join(','),
   )
@@ -132,7 +135,10 @@ function limpiarFiltros() {
   Object.assign(filtro, { texto: '', estado: '', soloAgua: false })
 }
 
-onMounted(cargar)
+onMounted(() => {
+  cargar()
+  cargarCatalogo()
+})
 onBeforeUnmount(() => clearTimeout(sondeo))
 </script>
 
@@ -220,10 +226,16 @@ onBeforeUnmount(() => clearTimeout(sondeo))
                 <span class="dos-lineas">
                   {{ fechaCorta(e.fecha_lluvia) }}
                   <small class="tenue">pasada {{ fechaCorta(e.hora_pasada) }} · pista {{ e.pista }}</small>
+                  <small v-if="e.modelo" class="tenue">{{ nombreModelo(e.modelo) }}</small>
                 </span>
               </td>
               <td v-if="esAdmin">{{ e.usuario }}</td>
-              <td><span class="estado" :class="e.estado">{{ ESTADOS[e.estado] }}</span></td>
+              <td>
+                <span class="dos-lineas">
+                  <span class="estado" :class="e.estado">{{ ESTADOS[e.estado] }}</span>
+                  <small v-if="e.etapa" class="tenue etapa-fila">{{ e.estado === 'error' ? `Falló en: ${e.etapa}` : e.etapa }}</small>
+                </span>
+              </td>
               <td class="num">{{ e.charcos ?? '—' }}</td>
               <td class="num">{{ area(e.area_agua_m2) }}</td>
               <td>

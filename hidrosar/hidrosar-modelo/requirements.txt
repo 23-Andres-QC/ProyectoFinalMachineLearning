@@ -1,4 +1,8 @@
 segmentation-models-pytorch==0.5.0
+# Machine Learning por píxel de vol3/ (Machine Learning · Vol2)
+scikit-learn==1.7.0
+joblib
+xgboost-cpu
 numpy
 scipy
 h5py

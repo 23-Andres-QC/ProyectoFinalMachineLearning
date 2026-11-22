@@ -56,7 +56,14 @@ def _en_grilla(coleccion, bbox, g, metodo):
 def dem_y_cobertura(bbox, g):
     """DEM en altura elipsoidal (la que usa la grilla de geolocalización de NISAR) y clases de WorldCover (80 = agua)."""
     o, s, e, n = bbox
-    geoide = GEOIDE.transform((o + e) / 2, (s + n) / 2, 0)[2]
+    try:
+        geoide = GEOIDE.transform((o + e) / 2, (s + n) / 2, 0, errcheck=True)[2]
+    except pyproj.exceptions.ProjError:
+        geoide = np.inf
+    if not np.isfinite(geoide):
+        raise ErrorProceso("No se pudo calcular la altura del geoide (EGM2008) del área. Vuelve a intentar con Reintentar.")
     dem = _en_grilla("cop-dem-glo-30", bbox, g, Resampling.bilinear).astype("float32") + geoide
+    if not np.isfinite(dem).any():
+        raise ErrorProceso("El relieve (DEM Copernicus) del área llegó vacío. Vuelve a intentar con Reintentar.")
     worldcover = _en_grilla("esa-worldcover", bbox, g, Resampling.nearest)
     return dem, worldcover

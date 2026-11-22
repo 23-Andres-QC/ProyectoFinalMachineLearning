@@ -290,7 +290,11 @@ func sumaLluvia(lluvia map[int64]float64, hasta time.Time, horas int) *float64 {
 	return &total
 }
 
-// elegirReferencias: hasta 2 pasadas secas de la misma pista (misma geometría de toma), primero las anteriores a la lluvia.
+// diasSecos: cuántas pasadas secas se usan de referencia. Basta una, la más reciente antes de la lluvia: es la que entra
+// a los modelos de cambio, y así se descarga un recorte menos.
+const diasSecos = 1
+
+// elegirReferencias: la pasada seca de la misma pista (misma geometría de toma), primero las anteriores a la lluvia.
 func elegirReferencias(p Pasada, todas []Pasada) PasadaLluvia {
 	var antes, despues []Pasada
 	for _, q := range todas {
@@ -309,16 +313,16 @@ func elegirReferencias(p Pasada, todas []Pasada) PasadaLluvia {
 	seca := func(q Pasada) bool { return q.Lluvia72hMM != nil && *q.Lluvia72hMM < 1 }
 	var refs []Pasada
 	for _, q := range candidatas {
-		if len(refs) < 2 && seca(q) {
+		if len(refs) < diasSecos && seca(q) {
 			refs = append(refs, q)
 		}
 	}
 	aviso := ""
-	if len(refs) < 2 {
+	if len(refs) < diasSecos {
 		for _, q := range candidatas {
-			if len(refs) < 2 && !seca(q) {
+			if len(refs) < diasSecos && !seca(q) {
 				refs = append(refs, q)
-				aviso = "Alguna referencia tuvo lluvia en las 72 h previas o no se pudo verificar: el resultado puede marcar menos agua de lluvia."
+				aviso = "El día de referencia tuvo lluvia en las 72 h previas o no se pudo verificar: el resultado puede marcar menos agua de lluvia."
 			}
 		}
 	}

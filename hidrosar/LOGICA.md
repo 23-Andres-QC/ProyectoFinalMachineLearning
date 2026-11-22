@@ -8,7 +8,7 @@ Detecta el agua de lluvia empozada en un área elegida en el mapa, usando imáge
 |---|---|
 | **web** (Vue + nginx) | Pantallas, mapa, dibujo del área. Pasa `/api` al backend. Es el único puerto expuesto. |
 | **backend** (Go) | Login, usuarios, roles, lista de lluvias, búsqueda en NISAR, cola de evaluaciones, entrega de resultados. |
-| **modelo** (Python) | Descarga solo el recorte del área, corre la U-Net y devuelve los polígonos de agua. |
+| **modelo** (Python) | Descarga solo el recorte del área, corre el modelo elegido y devuelve los polígonos de agua. |
 | **db** (PostgreSQL + PostGIS) | Usuarios, evaluaciones y polígonos resultantes. |
 
 ## Usuarios y roles
@@ -55,26 +55,62 @@ La pestaña tiene dos fuentes; se elige arriba y se recuerda en el navegador.
 ## Flujo de una evaluación
 
 1. **Login.** Se entra al mapa, o se elige una lluvia de la lista.
+   - Arriba del panel se elige el **modelo** (ver *Modelos*). La elección se recuerda en el navegador y se guarda con cada evaluación.
 2. **Elegir el área.** Se dibuja un rectángulo en el mapa. Debe medir al menos 1 km por lado y como máximo 150 km².
 3. **Elegir la fecha** de la lluvia.
 4. **Buscar en NISAR.** El backend consulta el catálogo de la ASF para esa área y esa fecha.
    - **Si hay pasada**: "Se encontró el radar NISAR el dd/mm/aaaa a las HH:MM". Se muestran la cobertura del área (%) y la lluvia de las 24 h y 72 h previas.
    - **Si no hay**: "No se encontró el radar NISAR en esa fecha". Se muestran la pasada anterior y la siguiente.
-   - Se eligen automáticamente hasta 2 **días secos de referencia**, de la misma órbita y con menos de 1 mm de lluvia en 72 h (dato de Open-Meteo).
+   - Se elige automáticamente **un día seco de referencia**: la pasada más reciente antes de la lluvia, de la misma órbita y con menos de 1 mm de lluvia en 72 h (dato de Open-Meteo). Con uno basta y se descarga un recorte menos.
 5. **Confirmar.** La evaluación entra a la cola y la pantalla muestra su estado: en cola → procesando → completado o error.
    - Si termina con error (por ejemplo, faltaba el modelo), **Reintentar** la vuelve a poner en cola sin buscar de nuevo.
-6. **Procesar** (contenedor modelo, de una en una):
+6. **Procesar** (contenedor modelo, de una en una). El panel muestra cada paso con su estado (hecho, en curso, pendiente o con error), los MB que van descargados y los segundos de cada uno. El modelo lo informa en `GET /progreso/{id}`; el backend lo copia cada 2 s a la columna `progreso` y queda guardado, así se ve en qué paso falló una evaluación. Los pasos son:
+   1. carga del modelo;
+   2. relieve (DEM) y cobertura del suelo;
+   3. descarga del recorte de la pasada de lluvia;
+   4. descarga del día seco;
+   5. segmentación;
+   6. polígonos del agua y de los charcos.
    - Arma una grilla de 5 m sobre el área, con su relieve (DEM) y su cobertura del suelo (WorldCover).
    - Lee de NISAR **solo los bytes del recorte** y nunca la franja completa.
-   - Si la pasada cubre menos del 20 % del área, termina con error.
-   - La U-Net marca el agua el día de la lluvia.
-   - Se quita lo que también es agua en los días secos o en el mar, y lo que no se oscureció al menos 3 dB.
-   - Se quitan las manchas chicas y las que tocan ríos o lagunas.
+   - Si el área queda en parte fuera de la franja que tomó el radar, se segmenta solo la parte con datos. El panel avisa qué porcentaje se evaluó cuando es menos del 90 %.
+   - Solo termina con error si la pasada no tiene datos en el área (menos del 1 %).
+   - El día seco sirve de referencia si tiene datos en al menos el 20 % de lo que cubre la pasada de lluvia. Las evaluaciones viejas que guardaron dos días secos bajan solo el primero; el segundo se baja únicamente si el primero no tiene datos en el área.
+   - Con un **modelo de agua**, que son las U-Net de 1 canal (Vol1 y Vol2) y el Machine Learning por píxel (Vol2) del notebook 01:
+     - el modelo marca el agua el día de la lluvia;
+     - se quita lo que también es agua en el día seco o en el mar, y lo que no se oscureció al menos 3 dB;
+     - se quitan las manchas chicas y las que tocan ríos o lagunas.
+   - Con un **modelo de cambio**, del pipeline final:
+     - la imagen de la lluvia y la del día seco, con el nivel alineado al del día seco, entran juntas a la U-Net de 2 canales;
+     - se queda lo que supera el umbral (0.9) en terreno plano (pendiente < 5°), sin agua permanente ni zonas que ya son oscuras en seco (< −18 dB);
+     - como en la regla del pipeline, se quitan las manchas de menos de 10 píxeles (250 m²).
+     - Sin día seco de referencia no se puede usar: el panel lo avisa antes de enviar.
    - El resultado se convierte en polígonos simplificados y recortados al rectángulo.
-7. **Ver el resultado.** El panel muestra las cifras y la lista de charcos de mayor a menor. Se pueden descargar en **KML** (Google Maps / Earth) o **GeoJSON**.
+   - Con un modelo de agua se guarda además **toda el agua segmentada** ese día (mar, ríos, lagunas y charcos), sin las manchas de menos de 10 píxeles (250 m²). Es la capa azul de la sección 10.1 del notebook 01. Los modelos de cambio no la tienen, porque marcan solo el agua nueva.
+7. **Ver el resultado.** El panel muestra las cifras y la lista de charcos de mayor a menor. Se pueden descargar en **KML** (Google Maps / Earth) o **GeoJSON**, con los charcos y el agua segmentada.
+   - En el mapa, el agua segmentada va en **azul** y los charcos (agua de lluvia empozada) en **rosado** encima, como en el notebook 01.
+   - El agua segmentada se pide aparte (`/api/evaluaciones/{id}/agua`) y solo cuando se dibuja la evaluación, porque con mar o ríos pesa más que los charcos.
    - La zona **no se dibuja sola** en el mapa al terminar. Se dibuja cuando se pide: **Ver en el mapa** en el panel, elegir un charco de la lista, o **Ver en el mapa** en la pestaña *Evaluaciones*.
    - Al elegir un charco, el mapa se acerca y lo resalta.
 8. **Limpiar y evaluar otra zona.** Despeja el panel y el mapa: el área, la búsqueda, el pin y lo dibujado. La evaluación ya quedó guardada en *Evaluaciones*. Si aún se procesa, sigue en segundo plano.
+
+## Modelos
+
+Están en `hidrosar-modelo/modelos/` (ver su `LEEME.md`). El selector del panel los agrupa así:
+
+| Grupo | Modelos | Entrada |
+|---|---|---|
+| Deep Learning · Vol1 | Ensamble y U-Net de cambio resnet34, efficientnet-b0, mobilenet_v2, vgg19_bn (pipeline final) | Lluvia + día seco previo, a 5 m |
+| | U-Net resnet34, efficientnet-b0, mobilenet_v2, vgg19_bn (notebook 01) | Imagen de radar a 5 m |
+| Deep Learning · Vol2 | U-Net efficientnet-b0, mobilenet_v2, resnet34 y resnet34 desde cero, cada una con su umbral (carpeta `vol3/`, de ModelosVol3) | Imagen de radar a 5 m |
+| Machine Learning · Vol2 | AdaBoost, árbol, HistGradientBoosting, KNN, MLP, Naive Bayes, Random Forest (y optimizado y + pendiente), regresión logística base, SVM rbf, XGBoost (carpeta `vol3/`) | Media y desviación de HH en 5×5 y 15×15 (y la pendiente en uno) a 5 m |
+
+- El predeterminado es el de `MODELO_PT` en el `.env`.
+- El servicio carga cada modelo cuando se pide y mantiene en memoria los 3 últimos.
+- KNN y SVM son lentos en áreas grandes. El SVM tarda alrededor de un minuto en un recorte de 4 × 4 km.
+- Los de Vol2 llevan «(Vol2)» en el nombre para no confundirlos en *Evaluaciones* con las U-Net de Vol1 que se llaman igual. Su id sigue siendo `vol3/…`, así las evaluaciones guardadas no pierden su modelo.
+- El Machine Learning de Vol2 usa el umbral que trae cada archivo, elegido en validación en el notebook 01.
+- Los modelos de agua superficial (Machine Learning a 20 m y U-Net de Keras) se quitaron del selector. Las evaluaciones que se hicieron con ellos muestran el modelo como «(retirado)».
 
 ## Historial en el mapa
 

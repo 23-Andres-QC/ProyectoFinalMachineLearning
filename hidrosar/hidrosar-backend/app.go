@@ -62,6 +62,7 @@ func (a *App) rutas() http.Handler {
 	m.Handle("GET /api/evaluaciones/{id}", a.conSesion(a.verEvaluacion))
 	m.Handle("GET /api/evaluaciones/{id}/resultado.geojson", a.conSesion(a.descargarGeoJSON))
 	m.Handle("GET /api/evaluaciones/{id}/resultado.kml", a.conSesion(a.descargarKML))
+	m.Handle("GET /api/evaluaciones/{id}/agua", a.conSesion(a.verAgua))
 	m.Handle("POST /api/evaluaciones/{id}/reintentar", a.conSesion(a.reintentarEvaluacion))
 	m.Handle("DELETE /api/evaluaciones/{id}", a.conSesion(a.eliminarEvaluacion))
 	return registrar(m)

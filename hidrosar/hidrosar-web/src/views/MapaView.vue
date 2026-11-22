@@ -5,7 +5,10 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { api } from '../api'
 import Confirmar from '../components/Confirmar.vue'
+import Icono from '../components/Icono.vue'
+import PasosProceso from '../components/PasosProceso.vue'
 import { ESTADOS, area, fechaCorta, hoyEn, mm } from '../formato'
+import { catalogo, guardarModelo, infoModelo, modeloGuardado, nombreModelo, predeterminado, usarSalud } from '../modelos'
 
 const route = useRoute()
 const router = useRouter()
@@ -35,14 +38,18 @@ const zoom = ref(5)
 const visibles = shallowRef(new Set())
 const lugarMarcado = ref('')
 const avisoLimpio = ref('')
+// Modelo con el que se evalúa: se recuerda en el navegador; si ya no está en el servicio, se usa el predeterminado
+const modeloElegido = ref(modeloGuardado())
 
 // Desde este zoom se dibuja cada charco; más lejos, cada evaluación es un marcador con su número de charcos.
 // Desde ZOOM_SIN_PUNTOS los polígonos ya se ven solos y se quitan los puntos que los marcan.
 const ZOOM_CHARCOS = 11
 const ZOOM_SIN_PUNTOS = 17
 const EN_CURSO = ['en_cola', 'procesando']
-const COLOR = { charco: '#ff2d55', evaluada: '#3ec7e6', fallida: '#ff9f0a', caja: '#ffd60a' }
+const COLOR = { charco: '#ff2d55', agua: '#1f6fff', evaluada: '#3ec7e6', fallida: '#ff9f0a', caja: '#ffd60a' }
 const ESTILO_CHARCO = { color: COLOR.charco, weight: 1.2, fillColor: COLOR.charco, fillOpacity: 0.55 }
+// Toda el agua que segmenta el modelo ese día (mar, ríos y charcos), en azul debajo de los charcos, como en el notebook 01
+const ESTILO_AGUA = { color: COLOR.agua, weight: 0.8, fillColor: COLOR.agua, fillOpacity: 0.4 }
 const ESTILO_AREA = {
   completado: { color: COLOR.evaluada, weight: 2, fillOpacity: 0.05 },
   en_curso: { color: COLOR.evaluada, weight: 2, dashArray: '4 4', fillOpacity: 0.04 },
@@ -51,7 +58,10 @@ const ESTILO_AREA = {
 
 // Los objetos de Leaflet quedan fuera de la reactividad de Vue
 let mapa, rectangulo, capaResultado, capaFoco, esquina, sondeo, sondeoHistorial, pin
-let capaAreas, capaCharcos, capaPuntos, capaResumen
+let capaAreas, capaAgua, capaCharcos, capaPuntos, capaResumen
+// El agua segmentada se pide aparte (puede pesar más que los charcos) y solo al dibujar la evaluación
+const aguaPedida = new Map()
+let generacionAgua = 0
 let pedidoEvaluacion = 0
 let pedidoHistorial = 0
 let vivo = true
@@ -80,21 +90,48 @@ const cercanas = computed(() =>
     { nombre: 'Siguiente', pasada: busqueda.value?.siguiente },
   ].filter((c) => c.pasada),
 )
+const modeloActual = computed(() => infoModelo(modeloElegido.value))
+const gruposModelos = computed(() => {
+  const grupos = []
+  for (const m of catalogo.value) {
+    const g = grupos.at(-1)?.familia === m.familia ? grupos.at(-1) : grupos[grupos.push({ familia: m.familia, modelos: [] }) - 1]
+    g.modelos.push(m)
+  }
+  return grupos
+})
+// Los modelos de cambio comparan con el día seco previo: sin días secos de referencia no pueden evaluar esa pasada
+const faltaReferencia = computed(() => modeloActual.value?.tipo === 'cambio' && !!pasada.value && !pasada.value.referencias?.length)
 const avisosModelo = computed(() => {
   const m = salud.value?.modelo
   if (!m) return []
   if (!m.disponible) return ['El servicio del modelo no responde.']
   const lista = []
-  if (!m.modelo_encontrado) lista.push(`Falta el modelo entrenado (${m.modelo}) en hidrosar-modelo/modelos/.`)
+  if (!catalogo.value.length) lista.push('No hay modelos entrenados en hidrosar-modelo/modelos/.')
   if (!m.credenciales_earthdata) lista.push('Faltan las credenciales de NASA Earthdata en el .env.')
+  if (faltaReferencia.value) {
+    lista.push(`«${modeloActual.value.nombre}» necesita un día seco de referencia y esta pasada no tiene. Elige otro modelo.`)
+  }
   return lista
 })
 const enCurso = computed(() => EN_CURSO.includes(evaluacion.value?.estado))
+// Pasos que informa el modelo: carga, relieve, descargas (con MB en vivo), segmentación y polígonos
+const pasos = computed(() => evaluacion.value?.progreso?.pasos || [])
+const duracion = computed(() => {
+  const s = pasos.value.reduce((t, p) => t + (p.segundos || 0), 0)
+  return s ? (s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`) : ''
+})
 const metodo = computed(() => {
   const m = evaluacion.value?.metodo || ''
-  if (m === 'sin_referencia') return 'solo U-Net (no hubo día seco de referencia)'
+  const cambio = m.match(/^cambio_2canales_vs_(\d+)_referencias$/)
+  if (cambio) {
+    return cambio[1] === '1'
+      ? 'cambio entre la lluvia y el día seco previo'
+      : `cambio entre la lluvia y el día seco previo, alineados con ${cambio[1]} días secos`
+  }
+  if (m === 'sin_referencia') return 'solo el modelo (no hubo día seco de referencia)'
   const n = m.match(/^cambio_vs_(\d+)_referencias$/)
-  return n ? `U-Net y cambio frente a ${n[1]} día(s) seco(s)` : m
+  if (!n) return m
+  return n[1] === '1' ? 'U-Net y cambio frente al día seco' : `U-Net y cambio frente a ${n[1]} días secos`
 })
 const charcosAbiertos = computed(() =>
   (evaluacion.value?.resultado?.features || [])
@@ -106,11 +143,16 @@ const abiertaVisible = computed(() => !!evaluacion.value && visibles.value.has(e
 const charcosDibujados = computed(
   () => dibujadas.value.reduce((s, h) => s + (h.charcos || 0), 0) || (abiertaVisible.value ? charcosAbiertos.value.length : 0),
 )
+const aguaDibujada = computed(
+  () => dibujadas.value.some((h) => h.agua_total_m2 > 0) || (abiertaVisible.value && evaluacion.value.agua_total_m2 > 0),
+)
+const modeloDeCambio = computed(() => infoModelo(evaluacion.value?.modelo)?.tipo === 'cambio')
 const leyenda = computed(() => {
   const estados = new Set(dibujadas.value.map((h) => h.estado))
   if (abiertaVisible.value) estados.add(evaluacion.value.estado)
   const items = []
-  if (charcosDibujados.value) items.push({ clase: 'charco', texto: 'Agua de lluvia empozada' })
+  if (charcosDibujados.value) items.push({ clase: 'charco', texto: 'Agua de lluvia empozada (charcos)' })
+  if (aguaDibujada.value) items.push({ clase: 'agua', texto: 'Agua segmentada por el modelo' })
   if (estados.has('completado')) items.push({ clase: 'evaluada', texto: 'Área evaluada' })
   if (EN_CURSO.some((e) => estados.has(e))) items.push({ clase: 'en-curso', texto: 'En proceso' })
   if (estados.has('error')) items.push({ clase: 'fallida', texto: 'Con error' })
@@ -124,11 +166,17 @@ const pct = (v) => (v == null ? '—' : `${Math.round(v)} %`)
 const nCharcos = (n) => `${n ?? 0} ${n === 1 ? 'charco' : 'charcos'}`
 const referencias = (p) =>
   (p?.referencias || []).map((r) => `${fechaCorta(r.hora_local.slice(0, 10))} (${mm(r.lluvia_72h_mm)} en 72 h)`).join(', ') || 'ninguno'
+// las pasadas buscadas desde ahora traen un solo día seco; las evaluaciones viejas pueden guardar dos
+const tituloReferencias = (p) => ((p?.referencias || []).length > 1 ? 'Días secos de referencia' : 'Día seco de referencia')
 const limitesDe = (b) => L.latLngBounds([b[1], b[0]], [b[3], b[2]])
 const bboxDe = (l) => [l.getWest(), l.getSouth(), l.getEast(), l.getNorth()].map((v) => Math.round(v * 1e6) / 1e6)
 
 watch([bbox, fecha], () => {
   busqueda.value = null
+})
+
+watch(modeloElegido, (id) => {
+  if (id) guardarModelo(id)
 })
 
 onMounted(async () => {
@@ -151,10 +199,11 @@ onMounted(async () => {
   L.control.scale({ imperial: false }).addTo(mapa)
 
   // Capas en orden: áreas abajo, luego los charcos, el área seleccionada y encima los puntos que marcan cada charco
-  for (const [nombre, z] of [['hs-areas', 402], ['hs-charcos', 410], ['hs-seleccion', 415], ['hs-puntos', 420]]) {
+  for (const [nombre, z] of [['hs-areas', 402], ['hs-agua', 406], ['hs-charcos', 410], ['hs-seleccion', 415], ['hs-puntos', 420]]) {
     mapa.createPane(nombre).style.zIndex = z
   }
   capaAreas = L.layerGroup().addTo(mapa)
+  capaAgua = L.layerGroup()
   capaCharcos = L.layerGroup()
   capaPuntos = L.layerGroup()
   capaResumen = L.layerGroup()
@@ -167,6 +216,8 @@ onMounted(async () => {
   const [estado] = await Promise.allSettled([api('/salud'), cargarHistorial()])
   if (!vivo) return
   salud.value = estado.status === 'fulfilled' ? estado.value : null
+  usarSalud(salud.value)
+  if (!catalogo.value.some((m) => m.id === modeloElegido.value)) modeloElegido.value = predeterminado.value
   // Al entrar no se dibuja nada del historial. Solo se dibuja lo que se pide: ?id viene de «Ver en el mapa» en Evaluaciones
   // y ?todas de «Ver todas en el mapa»; ?seguir es una evaluación recién enviada, que se sigue en el panel sin dibujarla
   const { id, seguir, todas, lat, lon, fecha: dia, lugar, ir } = route.query
@@ -251,10 +302,12 @@ async function cargarHistorial() {
 }
 
 function pintarHistorial() {
-  for (const capa of [capaAreas, capaCharcos, capaPuntos, capaResumen]) capa.clearLayers()
+  for (const capa of [capaAreas, capaAgua, capaCharcos, capaPuntos, capaResumen]) capa.clearLayers()
+  generacionAgua++
   // Del más antiguo al más reciente, para que lo último evaluado quede encima
   for (const h of [...historial.value].reverse()) {
     if (!visibles.value.has(h.id)) continue
+    dibujarAgua(h)
     const limites = limitesDe(h.bbox)
     // El área ya está a la vista: se abre sin mover el mapa. El marcador (mapa lejos) además acerca hasta el área.
     L.rectangle(limites, { pane: 'hs-areas', ...ESTILO_AREA[EN_CURSO.includes(h.estado) ? 'en_curso' : h.estado] })
@@ -286,8 +339,34 @@ function pintarHistorial() {
   }
   // Respaldo: la evaluación abierta y pedida en el mapa que todavía no llegó en el historial
   const e = evaluacion.value
-  if (e && visibles.value.has(e.id) && e.estado === 'completado' && !historial.value.some((h) => h.id === e.id)) mostrarResultado(e.resultado)
-  else quitarResultado()
+  if (e && visibles.value.has(e.id) && e.estado === 'completado' && !historial.value.some((h) => h.id === e.id)) {
+    mostrarResultado(e.resultado)
+    dibujarAgua(e)
+  } else quitarResultado()
+}
+
+// Agua segmentada de una evaluación: se pide una vez (la clave cambia si se vuelve a procesar) y se dibuja si sigue a la vista
+function dibujarAgua(h) {
+  if (!(h.agua_total_m2 > 0)) return
+  const clave = `${h.id}:${h.agua_total_m2}`
+  if (!aguaPedida.has(clave)) {
+    aguaPedida.set(
+      clave,
+      api(`/evaluaciones/${h.id}/agua`).catch(() => {
+        aguaPedida.delete(clave)
+        return null
+      }),
+    )
+  }
+  const generacion = generacionAgua
+  aguaPedida.get(clave).then((f) => {
+    if (!vivo || generacion !== generacionAgua || !f?.geometry) return
+    L.geoJSON(f.geometry, { pane: 'hs-agua', style: ESTILO_AGUA })
+      .bindTooltip(contenido(`Agua segmentada · ${area(f.properties.area_m2)}`, `Evaluación #${h.id} · todo lo que el modelo marca como agua ese día`), {
+        sticky: true,
+      })
+      .addTo(capaAgua)
+  })
 }
 
 // Dibuja solo estas evaluaciones del historial y encuadra el mapa en ellas
@@ -327,6 +406,7 @@ function ajustarAlZoom() {
   const cerca = zoom.value >= ZOOM_CHARCOS
   for (const [capa, ver] of [
     [capaResumen, !cerca],
+    [capaAgua, cerca],
     [capaCharcos, cerca],
     [capaPuntos, cerca && zoom.value < ZOOM_SIN_PUNTOS],
   ]) {
@@ -526,7 +606,7 @@ async function evaluar() {
   try {
     const { id } = await api('/evaluaciones', {
       metodo: 'POST',
-      datos: { busqueda_id: busqueda.value.busqueda_id, indice: indice.value },
+      datos: { busqueda_id: busqueda.value.busqueda_id, indice: indice.value, modelo: modeloActual.value?.id || '' },
     })
     busqueda.value = null
     // La evaluación nueva se sigue en el panel; en el mapa se dibuja solo si la persona lo pide
@@ -564,7 +644,8 @@ async function abrirEvaluacion(id, { encuadrar = true } = {}) {
     else if (visibles.value.has(e.id) && !historial.value.some((h) => h.id === e.id)) pintarHistorial()
     if (!vivo || pedido !== pedidoEvaluacion) return
     if (terminoAhora && visibles.value.has(e.id) && charcosAbiertos.value.length) verCharcos()
-    if (EN_CURSO.includes(e.estado)) sondeo = setTimeout(() => abrirEvaluacion(e.id), 5000)
+    // Mientras procesa se consulta seguido para ver avanzar los pasos y los MB descargados
+    if (EN_CURSO.includes(e.estado)) sondeo = setTimeout(() => abrirEvaluacion(e.id), e.estado === 'procesando' ? 2500 : 5000)
   } catch (err) {
     if (vivo && pedido === pedidoEvaluacion) error.value = err.message
   }
@@ -635,6 +716,20 @@ function limpiar() {
   <div class="mapa-vista">
     <aside class="panel">
       <p v-if="avisoLimpio" class="aviso exito" role="status">{{ avisoLimpio }}</p>
+      <section class="paso paso-modelo">
+        <label class="campo-modelo">
+          <span class="titulo-modelo"><span class="numero-icono"><Icono nombre="modelo" :tam="16" /></span> Modelo</span>
+          <select v-model="modeloElegido" :disabled="!catalogo.length">
+            <option v-if="!catalogo.length" value="">Sin modelos disponibles</option>
+            <optgroup v-for="g in gruposModelos" :key="g.familia" :label="g.familia">
+              <option v-for="m in g.modelos" :key="m.id" :value="m.id">
+                {{ m.nombre }}{{ m.id === predeterminado ? ' · predeterminado' : '' }}
+              </option>
+            </optgroup>
+          </select>
+        </label>
+        <p v-if="modeloActual" class="ayuda">{{ modeloActual.descripcion }}</p>
+      </section>
       <section class="paso">
         <div class="titulo-fila">
           <h2><span class="numero">1</span> Área a evaluar</h2>
@@ -700,14 +795,14 @@ function limpiar() {
               <span class="dato">Pista {{ p.pista }} · {{ p.direccion }} · {{ p.cuadros.length }} cuadro(s)</span>
               <span class="dato">Cobertura del área: {{ pct(p.cobertura_pct) }}</span>
               <span class="dato">Lluvia previa: {{ mm(p.lluvia_24h_mm) }} en 24 h · {{ mm(p.lluvia_72h_mm) }} en 72 h</span>
-              <span class="dato">Días secos de referencia: {{ referencias(p) }}</span>
+              <span class="dato">{{ tituloReferencias(p) }}: {{ referencias(p) }}</span>
               <span v-if="p.aviso" class="dato alerta-texto">{{ p.aviso }}</span>
             </span>
           </label>
           <div v-if="avisosModelo.length" class="aviso alerta">
             <p v-for="a in avisosModelo" :key="a">{{ a }}</p>
           </div>
-          <button type="button" class="boton ancho" :disabled="enviando || !pasada" @click="evaluar">
+          <button type="button" class="boton ancho" :disabled="enviando || !pasada || faltaReferencia" @click="evaluar">
             {{ enviando ? 'Enviando…' : 'Evaluar esta pasada' }}
           </button>
         </template>
@@ -733,22 +828,36 @@ function limpiar() {
           {{ evaluacion.pasada?.pista }})
         </p>
         <p v-if="evaluacion.estado === 'en_cola'" class="ayuda">Esperando turno: se procesa una evaluación a la vez.</p>
-        <p v-if="evaluacion.estado === 'procesando'" class="ayuda">
-          Descargando el recorte de NISAR y segmentando. Puede tardar varios minutos. Si sales o limpias, el resultado igual queda
-          guardado en Evaluaciones.
-        </p>
+        <template v-if="evaluacion.estado === 'procesando'">
+          <PasosProceso v-if="pasos.length" :pasos="pasos" aria-label="Avance de la evaluación" />
+          <p v-else class="ayuda">Preparando la evaluación…</p>
+          <p class="ayuda">Puede tardar varios minutos. Si sales o limpias, el resultado igual queda guardado en Evaluaciones.</p>
+        </template>
         <template v-if="evaluacion.estado === 'error'">
           <p class="error">{{ evaluacion.mensaje }}</p>
+          <PasosProceso v-if="pasos.length" :pasos="pasos" aria-label="Pasos hasta el error" />
           <button type="button" class="boton secundario" :disabled="reintentando" @click="reintentar">
             {{ reintentando ? 'Reintentando…' : 'Reintentar' }}
           </button>
         </template>
         <template v-if="evaluacion.estado === 'completado'">
+          <p v-if="evaluacion.mensaje" class="aviso alerta" role="status">{{ evaluacion.mensaje }}</p>
           <div class="cifras">
             <div><strong>{{ evaluacion.charcos ?? 0 }}</strong><span>charcos</span></div>
             <div><strong>{{ area(evaluacion.area_agua_m2 ?? 0) }}</strong><span>agua de lluvia</span></div>
             <div><strong>{{ evaluacion.mb_descargados ?? '—' }} MB</strong><span>descargados</span></div>
           </div>
+          <p v-if="evaluacion.agua_total_m2 != null" class="dato con-muestra">
+            <i class="muestra agua" aria-hidden="true"></i>
+            <span>Agua segmentada por el modelo: <strong>{{ area(evaluacion.agua_total_m2) }}</strong> (mar, ríos y charcos)</span>
+          </p>
+          <p v-else class="ayuda">
+            {{
+              modeloDeCambio
+                ? 'Este modelo marca solo el agua nueva: no guarda una capa con toda el agua de ese día.'
+                : 'Esta evaluación se hizo antes de que se guardara el agua segmentada. Para verla, haz una evaluación nueva.'
+            }}
+          </p>
           <p v-if="!evaluacion.charcos" class="ayuda">No se detectó agua de lluvia empozada en el área.</p>
           <div v-if="charcosAbiertos.length" class="subseccion">
             <div class="titulo-fila">
@@ -771,12 +880,19 @@ function limpiar() {
             </ol>
             <p class="ayuda">Elige un charco para acercarte a él.</p>
           </div>
+          <p v-if="evaluacion.modelo" class="ayuda">Modelo: {{ nombreModelo(evaluacion.modelo) }}</p>
           <p class="ayuda">Método: {{ metodo }}</p>
-          <div v-if="evaluacion.charcos" class="fila">
+          <details v-if="pasos.length" class="detalle-pasos">
+            <summary>Pasos del proceso{{ duracion ? ` · ${duracion}` : '' }}</summary>
+            <PasosProceso :pasos="pasos" />
+          </details>
+          <div v-if="evaluacion.charcos || evaluacion.agua_total_m2" class="fila">
             <a class="boton secundario" :href="`/api/evaluaciones/${evaluacion.id}/resultado.kml`" download>Descargar KML</a>
             <a class="boton secundario" :href="`/api/evaluaciones/${evaluacion.id}/resultado.geojson`" download>GeoJSON</a>
           </div>
-          <p v-if="evaluacion.charcos" class="ayuda">El KML se abre en Google Earth o se importa en Google My Maps.</p>
+          <p v-if="evaluacion.charcos || evaluacion.agua_total_m2" class="ayuda">
+            Llevan los charcos y el agua segmentada. El KML se abre en Google Earth o se importa en Google My Maps.
+          </p>
         </template>
         <div class="acciones-evaluacion">
           <button v-if="!abiertaVisible" type="button" class="boton secundario" @click="verAbiertaEnMapa">Ver en el mapa</button>
@@ -795,19 +911,21 @@ function limpiar() {
       <div ref="contenedor" class="mapa"></div>
       <div v-if="leyenda.length" class="leyenda">
         <span v-for="i in leyenda" :key="i.clase"><i class="muestra" :class="i.clase"></i> {{ i.texto }}</span>
-        <span v-if="zoom < ZOOM_CHARCOS && dibujadas.some((h) => h.charcos)" class="pista-zoom">
-          El número indica los charcos. Acerca el mapa para verlos.
+        <span v-if="zoom < ZOOM_CHARCOS && dibujadas.some((h) => h.charcos || h.agua_total_m2 > 0)" class="pista-zoom">
+          El número indica los charcos. Acerca el mapa para ver los charcos y el agua segmentada.
         </span>
       </div>
     </div>
 
     <Confirmar ref="confirmar">
       <dl v-if="pasada && medidas" class="resumen">
+        <dt>Modelo</dt>
+        <dd>{{ modeloActual?.nombre || 'el predeterminado' }}</dd>
         <dt>Área</dt>
         <dd>{{ km(medidas.ancho) }} × {{ km(medidas.alto) }} km ({{ km(medidas.area) }} km²)</dd>
         <dt>Pasada de lluvia</dt>
         <dd>{{ fechaCorta(pasada.hora_local) }} · pista {{ pasada.pista }} · {{ pasada.direccion }}</dd>
-        <dt>Días secos de referencia</dt>
+        <dt>{{ tituloReferencias(pasada) }}</dt>
         <dd>{{ referencias(pasada) }}</dd>
       </dl>
       <p class="ayuda">Se descarga de NISAR solo el recorte del área y se guardan solo los polígonos del agua.</p>
