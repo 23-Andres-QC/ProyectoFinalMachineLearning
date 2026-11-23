@@ -54,7 +54,7 @@ const escenas = computed(() => {
 
 const familiaDe = (v) => modelos.value.get(v.modelo)?.familia || 'Otros'
 const nombre = (v) => modelos.value.get(v.modelo)?.nombre || v.modelo.split('/').pop()
-const sinCambio = (e) => e.disponible && !e.cambio && datos.value.modelos.some((m) => m.tipo === 'cambio')
+const sinCambio = (e) => e.cambio === false && datos.value.modelos.some((m) => m.tipo === 'cambio')
 const titulo = (e) => (e.fecha ? `${e.lugar} · ${fechaCorta(e.fecha)}` : e.lugar)
 const nombreEscena = (clave) => {
   const e = datos.value.escenas.find((x) => x.clave === clave)
@@ -142,7 +142,8 @@ onBeforeUnmount(() => clearTimeout(sondeo))
             {{ e.dia === 'seco' ? 'Día seco' : 'Día de lluvia' }} · pista {{ e.pista }}<template v-if="e.seco">
               · día seco de referencia {{ fechaCorta(e.seco) }}</template> · {{ e.origen }}
           </p>
-          <p v-if="!e.disponible" class="aviso alerta">Faltan los recortes NISAR de esta zona en Data/crudos_nisar.</p>
+          <!-- las ya calculadas se muestran aunque falten los recortes (por ejemplo, en un servidor sin Data/) -->
+          <p v-if="e.vacia && !e.disponible" class="aviso alerta">Faltan los recortes NISAR de esta zona en Data/crudos_nisar.</p>
           <p v-else-if="e.vacia" class="ayuda">Ninguna validación con este filtro.</p>
           <div v-else class="tabla-contenedor">
             <table class="tabla">
