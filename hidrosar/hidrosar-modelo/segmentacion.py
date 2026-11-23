@@ -137,11 +137,11 @@ def alinear(img, med, permanente):
     return img - np.median((img - med)[ok]) if ok.any() else img
 
 
-def agua_nueva_por_cambio(modelo, hh_lluvia, secos, fecha_lluvia, worldcover, dem):
-    """Agua nueva con una U-Net de 2 canales: la imagen de la lluvia y la del día seco previo, las dos con el nivel alineado
-    a la mediana de los días secos (`referencia` y `entrada` del pipeline final). Solo se evalúa el terreno plano, sin agua
-    permanente ni zonas que ya son oscuras en seco, igual que la regla con la que se entrenaron.
-    `secos` es una lista de (fecha AAAAMMDD, hh) de la misma órbita."""
+def entrada_cambio(hh_lluvia, secos, fecha_lluvia, worldcover, dem):
+    """Entrada de las U-Net de 2 canales: la imagen de la lluvia y la del día seco previo, las dos con el nivel alineado a la
+    mediana de los días secos (`referencia` y `entrada` del pipeline final). Devuelve también la zona evaluable (terreno
+    plano, sin agua permanente ni zonas que ya son oscuras en seco) y el cambio respecto a la mediana seca, que es lo que
+    mira la regla con la que se entrenaron. `secos` es una lista de (fecha AAAAMMDD, hh) de la misma órbita."""
     permanente = worldcover == 80
     evento = suave_lineal(hh_lluvia)
     pila = np.stack([suave_lineal(h) for _, h in secos])
@@ -158,10 +158,16 @@ def agua_nueva_por_cambio(modelo, hh_lluvia, secos, fecha_lluvia, worldcover, de
     ev = alinear(evento, med, permanente)
     pre = alinear(suave_lineal(secos[i_previa][1]), med, permanente)
     x2 = np.stack([ev, pre]).astype("float32")
-    prob = modelo.probabilidad(x2)
     gy, gx = np.gradient(np.nan_to_num(dem), 5.0)
     plano = np.degrees(np.arctan(np.hypot(gx, gy))) < PENDIENTE_MAX
     evaluable = np.isfinite(x2).all(0) & np.isfinite(med) & plano & ~permanente & (med > OSCURO_SIEMPRE)
+    return x2, evaluable, ev - med
+
+
+def agua_nueva_por_cambio(modelo, hh_lluvia, secos, fecha_lluvia, worldcover, dem):
+    """Agua nueva con una U-Net de 2 canales (ver `entrada_cambio`), sin manchas de menos de 10 píxeles."""
+    x2, evaluable, _ = entrada_cambio(hh_lluvia, secos, fecha_lluvia, worldcover, dem)
+    prob = modelo.probabilidad(x2)
     m = ndimage.binary_opening((prob >= modelo.umbral) & evaluable)
     manchas, n = ndimage.label(m)
     if n:
@@ -169,9 +175,17 @@ def agua_nueva_por_cambio(modelo, hh_lluvia, secos, fecha_lluvia, worldcover, de
     return m, f"cambio_2canales_vs_{len(secos)}_referencias"
 
 
-def vectorizar(m, g, bbox):
-    """Polígonos de una máscara (agua de lluvia o agua segmentada) en lat/lon: simplificados a 2.5 m (la mitad del
-    píxel), recortados al área y con coordenadas redondeadas a 1e-6° (~0.1 m). Es lo único que se guarda."""
+def _poligonos(geom):
+    """Los polígonos de una geometría cualquiera (polígono, multipolígono o colección), sin líneas ni puntos."""
+    if geom.geom_type == "Polygon":
+        return [] if geom.is_empty else [geom]
+    return [p for parte in getattr(geom, "geoms", []) for p in _poligonos(parte)]
+
+
+def vectorizar(m, g, bbox, tolerancia=2.5):
+    """Polígonos de una máscara (agua de lluvia o agua segmentada) en lat/lon: simplificados a `tolerancia` metros (por
+    defecto 2.5 m, la mitad del píxel), recortados al área y con coordenadas redondeadas a 1e-6° (~0.1 m). Es lo único que
+    se guarda."""
     if not m.any():
         return None, 0, 0.0
     a_utm = Transformer.from_crs("EPSG:4326", g["crs"], always_xy=True)
@@ -180,10 +194,15 @@ def vectorizar(m, g, bbox):
     etiquetas, _ = ndimage.label(m)
     poligonos = []
     for geom, _ in shapes(etiquetas.astype("int32"), mask=m, transform=g["transform"]):
-        p = shape(geom).simplify(2.5, preserve_topology=True).intersection(caja)
-        poligonos += [q for q in getattr(p, "geoms", [p]) if q.geom_type == "Polygon" and not q.is_empty]
+        p = shape(geom).simplify(tolerancia, preserve_topology=True)
+        # al simplificar, un hueco que toca el borde exterior puede dejar el polígono inválido: se repara antes de recortar
+        if not p.is_valid:
+            p = shapely.make_valid(p)
+        poligonos += _poligonos(p.intersection(caja))
     if not poligonos:
         return None, 0, 0.0
     area = float(sum(p.area for p in poligonos))
     multi = shapely.transform(MultiPolygon(poligonos), lambda xy: np.column_stack(a_geo.transform(xy[:, 0], xy[:, 1])))
-    return mapping(shapely.set_precision(multi, 1e-6)), len(poligonos), round(area, 1)
+    # redondeo punto por punto: el modo normal rehace la topología y falla si dos manchas vecinas se solapan tras
+    # simplificarlas; la base de datos la repara al guardar (ST_MakeValid)
+    return mapping(shapely.set_precision(multi, 1e-6, mode="pointwise")), len(poligonos), round(area, 1)

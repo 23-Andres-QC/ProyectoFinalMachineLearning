@@ -25,9 +25,11 @@ services:
     environment:
       EARTHDATA_USER: ${EARTHDATA_USER:-}
       EARTHDATA_PASSWORD: ${EARTHDATA_PASSWORD:-}
-      MODELO_PT: /modelos/${MODELO_PT:-unet_resnet34.pt}
+      MODELO_PT: /modelos/${MODELO_PT:-vol3/unet_efficientnet-b0.pt}
     volumes:
       - ./hidrosar-modelo/modelos:/modelos:ro
+      # recortes NISAR ya descargados: las validaciones los leen de aquí (no se descargan otra vez)
+      - ../Data/crudos_nisar:/crudos:ro
 
   backend:
     build: ./hidrosar-backend

@@ -100,8 +100,7 @@ Están en `hidrosar-modelo/modelos/` (ver su `LEEME.md`). El selector del panel 
 
 | Grupo | Modelos | Entrada |
 |---|---|---|
-| Deep Learning · Vol1 | Ensamble y U-Net de cambio resnet34, efficientnet-b0, mobilenet_v2, vgg19_bn (pipeline final) | Lluvia + día seco previo, a 5 m |
-| | U-Net resnet34, efficientnet-b0, mobilenet_v2, vgg19_bn (notebook 01) | Imagen de radar a 5 m |
+| Deep Learning · Vol1 | Ensamble y U-Net de cambio resnet34, efficientnet-b0, mobilenet_v2, vgg19_bn (carpeta `Vol1`, pipeline final) | Lluvia + día seco previo, a 5 m |
 | Deep Learning · Vol2 | U-Net efficientnet-b0, mobilenet_v2, resnet34 y resnet34 desde cero, cada una con su umbral (carpeta `vol3/`, de ModelosVol3) | Imagen de radar a 5 m |
 | Machine Learning · Vol2 | AdaBoost, árbol, HistGradientBoosting, KNN, MLP, Naive Bayes, Random Forest (y optimizado y + pendiente), regresión logística base, SVM rbf, XGBoost (carpeta `vol3/`) | Media y desviación de HH en 5×5 y 15×15 (y la pendiente en uno) a 5 m |
 
@@ -110,7 +109,36 @@ Están en `hidrosar-modelo/modelos/` (ver su `LEEME.md`). El selector del panel 
 - KNN y SVM son lentos en áreas grandes. El SVM tarda alrededor de un minuto en un recorte de 4 × 4 km.
 - Los de Vol2 llevan «(Vol2)» en el nombre para no confundirlos en *Evaluaciones* con las U-Net de Vol1 que se llaman igual. Su id sigue siendo `vol3/…`, así las evaluaciones guardadas no pierden su modelo.
 - El Machine Learning de Vol2 usa el umbral que trae cada archivo, elegido en validación en el notebook 01.
-- Los modelos de agua superficial (Machine Learning a 20 m y U-Net de Keras) se quitaron del selector. Las evaluaciones que se hicieron con ellos muestran el modelo como «(retirado)».
+- Los modelos de agua superficial (Machine Learning a 20 m y U-Net de Keras) y las U-Net de 1 canal sueltas de la corrida anterior (`unet_<encoder>.pt`) se quitaron del selector. Las evaluaciones que se hicieron con ellos muestran el modelo como «(retirado)».
+
+## Validaciones
+
+La pestaña *Validaciones* lista el mejor modelo de cada grupo corrido en las zonas de validación de los notebooks. No muestra métricas: cada fila se abre en el mapa con **Ver en el mapa** (`?validacion=`).
+
+| Grupo | Modelo que se valida | Por qué |
+|---|---|---|
+| Deep Learning · Vol1 | Ensamble de U-Net de cambio | «mejor modelo» de `pipeline-final.ipynb` |
+| Deep Learning · Vol2 | U-Net efficientnet-b0 | mayor IoU en validación de las U-Net de `finalvol1.ipynb` |
+| Machine Learning · Vol2 | Random Forest + pendiente | mayor IoU en validación de los modelos de ML de `finalvol1.ipynb` |
+
+La lista está en `MODELOS` de `hidrosar-modelo/validacion.py`.
+
+| Zona | Día | Día seco de la misma órbita |
+|---|---|---|
+| Iquitos (pista 155 D) | lluvia 04/09/2026 y 22/10/2026; seco 24/06/2026 | 24/06/2026 |
+| Concepción (097 D) | lluvia 24/09/2026 | 19/08/2026 |
+| Puerto Montt (104 A) | lluvia 15/07/2026 | — |
+| Lima Sur (003 A) | lluvia 05/11/2026 | 25/08/2026 |
+
+- En el mapa se ven tres capas, cada una se puede apagar:
+  - **aciertos** (azul): agua que marcan el modelo y la referencia;
+  - **falsas alarmas** (ámbar): agua que marca el modelo y la referencia no;
+  - **omisiones** (rosa, borde punteado): agua de la referencia que el modelo no marca.
+- La referencia de las U-Net y el Machine Learning de Vol2 es la etiqueta de `finalvol1.ipynb`: HH suavizado bajo el umbral calibrado con el agua permanente de WorldCover, en terreno plano, sin manchas de menos de 40 píxeles. En el día seco es el agua permanente de WorldCover.
+- La referencia de las U-Net de cambio de Vol1 es la regla de `pipeline-final.ipynb`: HH 3 dB o más por debajo del día seco, en la zona evaluable. Solo se validan en las zonas con día seco de la misma órbita.
+- Se usan los recortes que ya están en `Data/crudos_nisar` (montado en el servicio del modelo como `/crudos`, solo lectura): no se descarga nada de NISAR.
+- Se calculan en segundo plano, una a la vez y siempre después de las evaluaciones de los usuarios. El backend agrega las que faltan cada 5 minutos (por ejemplo, si se copia un modelo nuevo). Solo se guardan los polígonos en PostGIS (tabla `validaciones`).
+- El administrador puede **recalcular** una validación terminada.
 
 ## Historial en el mapa
 

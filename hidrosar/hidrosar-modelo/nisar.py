@@ -77,7 +77,8 @@ class Remoto(io.RawIOBase):
 
 def geocodificar(urls, bbox, dem, g, al_bajar=None):
     """HH (dB, sigma0 calibrado y sin ruido) de una pasada en la grilla g; la pasada puede venir en varios cuadros.
-    al_bajar(mb) recibe los MB descargados de la pasada mientras se leen."""
+    Cada cuadro es una URL de NISAR en la ASF o, en la validación, la ruta de un recorte ya guardado en /crudos (no se
+    descarga nada). al_bajar(mb) recibe los MB descargados de la pasada mientras se leen."""
     o, s, e, n = bbox
     alto, ancho = dem.shape
     cc, ff = np.meshgrid(np.arange(0, ancho, 10), np.arange(0, alto, 10))
@@ -87,10 +88,11 @@ def geocodificar(urls, bbox, dem, g, al_bajar=None):
     hh = np.full(dem.shape, np.nan, "float32")
     bajado = 0
     for url in urls:
-        remoto = Remoto(url)
-        if al_bajar:
+        local = not str(url).startswith("https://")
+        remoto = None if local else Remoto(url)
+        if remoto and al_bajar:
             remoto.al_leer = lambda b, previo=bajado: al_bajar((previo + b) / 1e6)
-        with h5py.File(io.BufferedReader(remoto, 1 << 22), "r") as f:
+        with h5py.File(url if local else io.BufferedReader(remoto, 1 << 22), "r") as f:
             geo, sw = f["science/LSAR/RSLC/metadata/geolocationGrid"], f["science/LSAR/RSLC/swaths"]
             t, r = sw["zeroDopplerTime"][()], sw["frequencyA/slantRange"][()]
             ta, ra = np.meshgrid((geo["zeroDopplerTime"][()] - t[0]) / (t[1] - t[0]),
@@ -107,14 +109,14 @@ def geocodificar(urls, bbox, dem, g, al_bajar=None):
                 grueso = LinearNDInterpolator(np.c_[X[m], Y[m]], np.c_[ta[m], ra[m]])(lon, lat).astype("float32")
                 capas.append([ndimage.map_coordinates(grueso[..., i], [fi, fj], order=1, mode="nearest") for i in (0, 1)])
             if len(capas) < 2:
-                bajado += remoto.bajado
+                bajado += remoto.bajado if remoto else 0
                 continue
             w = (dem - alturas[k0]) / (alturas[k1] - alturas[k0])
             az = np.nan_to_num(capas[0][0] + w * (capas[1][0] - capas[0][0]), nan=-9)
             rg = np.nan_to_num(capas[0][1] + w * (capas[1][1] - capas[0][1]), nan=-9)
             nuevo = np.isnan(hh) & (az >= 0) & (az <= len(t) - 1) & (rg >= 0) & (rg <= len(r) - 1)
             if not nuevo.any():
-                bajado += remoto.bajado
+                bajado += remoto.bajado if remoto else 0
                 continue
             az, rg = az[nuevo], rg[nuevo]
             a0, r0 = int(az.min()), int(rg.min())
@@ -123,7 +125,7 @@ def geocodificar(urls, bbox, dem, g, al_bajar=None):
             lut, lt, lr = cal["sigma0"][()], cal["zeroDopplerTime"][()], cal["slantRange"][()]
             ruido = f["science/LSAR/RSLC/metadata/calibrationInformation/frequencyA/noiseEquivalentBackscatter"]
             nes, nt, nr = ruido["HH"][()], ruido["zeroDopplerTime"][()], ruido["slantRange"][()]
-        bajado += remoto.bajado
+        bajado += remoto.bajado if remoto else 0
         slc[slc == 0] = np.nan
         tiempo, distancia = t[0] + az * (t[1] - t[0]), r[0] + rg * (r[1] - r[0])
         L = ndimage.map_coordinates(lut.astype("float32"), [(tiempo - lt[0]) / (lt[1] - lt[0]), (distancia - lr[0]) / (lr[1] - lr[0])],

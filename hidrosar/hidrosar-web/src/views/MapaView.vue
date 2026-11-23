@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -38,6 +38,9 @@ const zoom = ref(5)
 const visibles = shallowRef(new Set())
 const lugarMarcado = ref('')
 const avisoLimpio = ref('')
+// validación de un modelo abierta desde la página Validaciones (?validacion=), con las capas que se ven
+const validacion = shallowRef(null)
+const capasValidacion = reactive({ aciertos: true, falsas: true, omisiones: true })
 // Modelo con el que se evalúa: se recuerda en el navegador; si ya no está en el servicio, se usa el predeterminado
 const modeloElegido = ref(modeloGuardado())
 
@@ -50,6 +53,17 @@ const COLOR = { charco: '#ff2d55', agua: '#1f6fff', evaluada: '#3ec7e6', fallida
 const ESTILO_CHARCO = { color: COLOR.charco, weight: 1.2, fillColor: COLOR.charco, fillOpacity: 0.55 }
 // Toda el agua que segmenta el modelo ese día (mar, ríos y charcos), en azul debajo de los charcos, como en el notebook 01
 const ESTILO_AGUA = { color: COLOR.agua, weight: 0.8, fillColor: COLOR.agua, fillOpacity: 0.4 }
+// Validación: azul, ámbar y rosa con borde punteado (el punteado distingue las omisiones aunque no se vea el color)
+const CAPAS_VALIDACION = [
+  { capa: 'aciertos', clase: 'acierto', texto: 'Aciertos', detalle: 'agua que marcan el modelo y la referencia' },
+  { capa: 'falsas', clase: 'falsa', texto: 'Falsas alarmas', detalle: 'agua que marca el modelo y la referencia no' },
+  { capa: 'omisiones', clase: 'omision', texto: 'Omisiones', detalle: 'agua de la referencia que el modelo no marca' },
+]
+const ESTILO_VALIDACION = {
+  aciertos: { color: '#1f8fff', weight: 0.8, fillColor: '#1f8fff', fillOpacity: 0.55 },
+  falsas: { color: '#ffb020', weight: 0.8, fillColor: '#ffb020', fillOpacity: 0.6 },
+  omisiones: { color: '#ff2d78', weight: 1.6, dashArray: '4 3', fillColor: '#ff2d78', fillOpacity: 0.18 },
+}
 const ESTILO_AREA = {
   completado: { color: COLOR.evaluada, weight: 2, fillOpacity: 0.05 },
   en_curso: { color: COLOR.evaluada, weight: 2, dashArray: '4 4', fillOpacity: 0.04 },
@@ -59,6 +73,9 @@ const ESTILO_AREA = {
 // Los objetos de Leaflet quedan fuera de la reactividad de Vue
 let mapa, rectangulo, capaResultado, capaFoco, esquina, sondeo, sondeoHistorial, pin
 let capaAreas, capaAgua, capaCharcos, capaPuntos, capaResumen
+let lienzo, zonaValidacion, sondeoValidacion
+let pedidoValidacion = 0
+const dibujoValidacion = {}
 // El agua segmentada se pide aparte (puede pesar más que los charcos) y solo al dibujar la evaluación
 const aguaPedida = new Map()
 let generacionAgua = 0
@@ -151,6 +168,10 @@ const leyenda = computed(() => {
   const estados = new Set(dibujadas.value.map((h) => h.estado))
   if (abiertaVisible.value) estados.add(evaluacion.value.estado)
   const items = []
+  if (validacion.value) {
+    for (const c of CAPAS_VALIDACION) if (capasValidacion[c.capa] && hayCapa(c.capa)) items.push({ clase: c.clase, texto: c.texto })
+    items.push({ clase: 'zona-validacion', texto: 'Zona de validación' })
+  }
   if (charcosDibujados.value) items.push({ clase: 'charco', texto: 'Agua de lluvia empozada (charcos)' })
   if (aguaDibujada.value) items.push({ clase: 'agua', texto: 'Agua segmentada por el modelo' })
   if (estados.has('completado')) items.push({ clase: 'evaluada', texto: 'Área evaluada' })
@@ -159,6 +180,14 @@ const leyenda = computed(() => {
   if (bbox.value) items.push({ clase: 'caja', texto: 'Área seleccionada' })
   if (lugarMarcado.value) items.push({ clase: 'pin', texto: lugarMarcado.value })
   return items
+})
+
+const hayCapa = (capa) => (validacion.value?.capas?.features || []).some((f) => f.properties.capa === capa)
+const lugarValidacion = computed(() => {
+  const v = validacion.value
+  const e = v?.info_escena
+  if (!e) return v?.escena || ''
+  return `${e.lugar} · ${e.dia === 'seco' ? 'día seco' : 'lluvia'} del ${fechaCorta(e.fecha)} · pista ${e.pista}`
 })
 
 const km = (v) => v.toLocaleString('es-PE', { maximumFractionDigits: 1 })
@@ -202,6 +231,8 @@ onMounted(async () => {
   for (const [nombre, z] of [['hs-areas', 402], ['hs-agua', 406], ['hs-charcos', 410], ['hs-seleccion', 415], ['hs-puntos', 420]]) {
     mapa.createPane(nombre).style.zIndex = z
   }
+  // las capas de una validación pueden traer miles de polígonos: se pintan en un lienzo y no como elementos SVG
+  lienzo = L.canvas({ pane: 'hs-agua', padding: 0.3 })
   capaAreas = L.layerGroup().addTo(mapa)
   capaAgua = L.layerGroup()
   capaCharcos = L.layerGroup()
@@ -219,12 +250,14 @@ onMounted(async () => {
   usarSalud(salud.value)
   if (!catalogo.value.some((m) => m.id === modeloElegido.value)) modeloElegido.value = predeterminado.value
   // Al entrar no se dibuja nada del historial. Solo se dibuja lo que se pide: ?id viene de «Ver en el mapa» en Evaluaciones
-  // y ?todas de «Ver todas en el mapa»; ?seguir es una evaluación recién enviada, que se sigue en el panel sin dibujarla
-  const { id, seguir, todas, lat, lon, fecha: dia, lugar, ir } = route.query
+  // y ?todas de «Ver todas en el mapa»; ?seguir es una evaluación recién enviada, que se sigue en el panel sin dibujarla.
+  // ?validacion viene de «Ver en el mapa» en Validaciones
+  const { id, seguir, todas, lat, lon, fecha: dia, lugar, ir, validacion: idValidacion } = route.query
   const numero = (v) => (typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null)
   const diaValido = /^\d{4}-\d{2}-\d{2}$/.test(dia || '') ? dia : ''
   const nombreLugar = typeof lugar === 'string' ? lugar.slice(0, 120) : ''
-  if (numero(id)) {
+  if (numero(idValidacion)) abrirValidacion(numero(idValidacion))
+  else if (numero(id)) {
     visibles.value = new Set([numero(id)])
     pintarHistorial()
     abrirEvaluacion(numero(id))
@@ -243,6 +276,7 @@ onBeforeUnmount(() => {
   vivo = false
   clearTimeout(sondeo)
   clearTimeout(sondeoHistorial)
+  clearTimeout(sondeoValidacion)
   window.removeEventListener('keydown', alTeclear)
   mapa?.remove()
 })
@@ -492,9 +526,87 @@ function quitarFoco() {
   charcoElegido.value = null
 }
 
+// --- Validaciones de los modelos: se dibujan solo al pedirlas con «Ver en el mapa» en Validaciones, y solas ---
+
+async function abrirValidacion(id) {
+  clearTimeout(sondeoValidacion)
+  const pedido = ++pedidoValidacion
+  try {
+    const v = await api(`/validaciones/${id}`)
+    if (!vivo || pedido !== pedidoValidacion) return
+    const otra = validacion.value?.id !== v.id
+    validacion.value = v
+    if (otra) {
+      reiniciarEvaluacion()
+      visibles.value = new Set()
+      pintarHistorial()
+      mapa.fitBounds(limitesDe(v.bbox), { padding: [30, 30] })
+    }
+    dibujarValidacion()
+    if (['pendiente', 'procesando'].includes(v.estado)) sondeoValidacion = setTimeout(() => abrirValidacion(v.id), 15000)
+  } catch (err) {
+    if (vivo && pedido === pedidoValidacion) error.value = err.message
+  }
+}
+
+function dibujarValidacion() {
+  quitarCapasValidacion()
+  const v = validacion.value
+  if (!v) return
+  zonaValidacion = L.rectangle(limitesDe(v.bbox), {
+    pane: 'hs-areas',
+    color: '#ffffff',
+    weight: 2,
+    dashArray: '6 4',
+    fill: false,
+    interactive: false,
+  }).addTo(mapa)
+  // vienen omisiones, falsas alarmas y aciertos, en ese orden: los aciertos quedan encima
+  for (const f of v.capas?.features || []) {
+    const c = CAPAS_VALIDACION.find((x) => x.capa === f.properties.capa)
+    if (!c || !f.geometry) continue
+    dibujoValidacion[c.capa] = L.geoJSON(f.geometry, { renderer: lienzo, style: ESTILO_VALIDACION[c.capa] }).bindTooltip(
+      contenido(c.texto, `${nombreModelo(v.modelo)} · ${c.detalle}`),
+      { sticky: true },
+    )
+    if (capasValidacion[c.capa]) dibujoValidacion[c.capa].addTo(mapa)
+  }
+}
+
+function alternarCapa(capa, ver) {
+  capasValidacion[capa] = ver
+  const capaMapa = dibujoValidacion[capa]
+  if (!capaMapa) return
+  if (ver) capaMapa.addTo(mapa)
+  else capaMapa.remove()
+}
+
+function encuadrarValidacion() {
+  if (validacion.value) mapa.fitBounds(limitesDe(validacion.value.bbox), { padding: [30, 30] })
+}
+
+function quitarCapasValidacion() {
+  zonaValidacion?.remove()
+  zonaValidacion = null
+  for (const capa of Object.keys(dibujoValidacion)) {
+    dibujoValidacion[capa].remove()
+    delete dibujoValidacion[capa]
+  }
+}
+
+// con cambiarRuta = false la llama quien ya está cambiando la dirección (por ejemplo, al abrir una evaluación)
+function quitarValidacion({ cambiarRuta = true } = {}) {
+  clearTimeout(sondeoValidacion)
+  pedidoValidacion++
+  validacion.value = null
+  quitarCapasValidacion()
+  if (cambiarRuta && route.query.validacion) router.replace({ query: {} })
+}
+
 // --- Dibujo del rectángulo: un clic en una esquina y otro en la opuesta (funciona igual con el dedo) ---
 
 function empezarDibujo() {
+  quitarValidacion()
   reiniciarEvaluacion()
   error.value = ''
   avisoLimpio.value = ''
@@ -631,6 +743,7 @@ async function abrirEvaluacion(id, { encuadrar = true } = {}) {
     const terminoAhora = !otra && EN_CURSO.includes(antes.estado) && !EN_CURSO.includes(e.estado)
     evaluacion.value = e
     if (otra) {
+      quitarValidacion({ cambiarRuta: false })
       quitarResultado()
       quitarFoco()
       bbox.value = e.bbox
@@ -694,6 +807,7 @@ function limpiar() {
   const id = evaluacion.value?.id
   const enProceso = enCurso.value
   if (dibujando.value) cancelarDibujo()
+  quitarValidacion()
   reiniciarEvaluacion()
   bbox.value = null
   busqueda.value = null
@@ -716,6 +830,44 @@ function limpiar() {
   <div class="mapa-vista">
     <aside class="panel">
       <p v-if="avisoLimpio" class="aviso exito" role="status">{{ avisoLimpio }}</p>
+      <section v-if="validacion" class="paso" aria-labelledby="titulo-validacion">
+        <div class="titulo-fila">
+          <h2 id="titulo-validacion" class="titulo-modelo">
+            <span class="numero-icono"><Icono nombre="modelo" :tam="16" /></span> Validación
+          </h2>
+          <RouterLink to="/validaciones" class="boton-texto">Ver todas</RouterLink>
+        </div>
+        <p class="dato">
+          <strong>{{ nombreModelo(validacion.modelo) }}</strong>
+          <span v-if="infoModelo(validacion.modelo)" class="tenue"> · {{ infoModelo(validacion.modelo).familia }}</span>
+        </p>
+        <p class="dato">{{ lugarValidacion }}</p>
+        <template v-if="validacion.estado === 'completado'">
+          <p class="ayuda">Comparado con {{ validacion.referencia }}.</p>
+          <fieldset class="capas-validacion">
+            <legend class="oculto">Capas de la validación</legend>
+            <label v-for="c in CAPAS_VALIDACION" :key="c.capa" class="casilla">
+              <input
+                type="checkbox"
+                :checked="capasValidacion[c.capa]"
+                :disabled="!hayCapa(c.capa)"
+                @change="alternarCapa(c.capa, $event.target.checked)"
+              >
+              <i class="muestra" :class="c.clase" aria-hidden="true"></i>
+              <span class="dos-lineas">
+                {{ c.texto }}
+                <small class="tenue">{{ hayCapa(c.capa) ? c.detalle : 'no hay en esta zona' }}</small>
+              </span>
+            </label>
+          </fieldset>
+        </template>
+        <p v-else-if="validacion.estado === 'error'" class="error">{{ validacion.mensaje }}</p>
+        <p v-else class="ayuda">Todavía se está calculando: se dibuja apenas esté lista.</p>
+        <div class="acciones-evaluacion">
+          <button type="button" class="boton secundario" @click="encuadrarValidacion">Ir a la zona</button>
+          <button type="button" class="boton" @click="quitarValidacion()">Quitar del mapa</button>
+        </div>
+      </section>
       <section class="paso paso-modelo">
         <label class="campo-modelo">
           <span class="titulo-modelo"><span class="numero-icono"><Icono nombre="modelo" :tam="16" /></span> Modelo</span>
@@ -734,7 +886,7 @@ function limpiar() {
         <div class="titulo-fila">
           <h2><span class="numero">1</span> Área a evaluar</h2>
           <button
-            v-if="!evaluacion && (bbox || lugarMarcado || visibles.size)"
+            v-if="!evaluacion && (bbox || lugarMarcado || visibles.size || validacion)"
             type="button"
             class="boton-texto"
             @click="limpiar"

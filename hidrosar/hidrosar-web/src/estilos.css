@@ -2055,6 +2055,63 @@ kbd {
   border: 2px solid var(--borde);
 }
 
+/* Validación de un modelo: los mismos colores del mapa; las omisiones llevan borde punteado */
+.muestra.acierto {
+  background: color-mix(in srgb, #1f8fff 60%, transparent);
+  border: 1.5px solid #1f8fff;
+}
+
+.muestra.falsa {
+  background: color-mix(in srgb, #ffb020 65%, transparent);
+  border: 1.5px solid #ffb020;
+}
+
+.muestra.omision {
+  background: color-mix(in srgb, #ff2d78 20%, transparent);
+  border: 2px dashed #ff2d78;
+}
+
+.muestra.zona-validacion {
+  border: 2px dashed #ffffff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+}
+
+.capas-validacion {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.capas-validacion .casilla {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.capas-validacion .muestra {
+  margin-top: 3px;
+}
+
+.escena-validacion {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.escena-validacion h2 {
+  font-size: 1.05rem;
+}
+
+.fila-grupo th {
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--tenue);
+  background: var(--superficie-2);
+  text-align: left;
+}
+
 .muestra.pin {
   background: var(--acento);
   border: 2px solid #fff;

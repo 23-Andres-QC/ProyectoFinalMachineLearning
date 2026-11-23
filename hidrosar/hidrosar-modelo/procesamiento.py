@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from errores import ErrorProceso
-from modelos import Modelos, catalogo
+from modelos import CARPETA, VOL3, Modelos, catalogo
 from nisar import geocodificar, preparar_credenciales
 from progreso import Avance, mb
 from segmentacion import DISPOSITIVO, agua_de_lluvia, agua_nueva_por_cambio, vectorizar
@@ -29,6 +29,18 @@ def fecha_corta(urls):
     return f" ({f[6:]}/{f[4:6]}/{f[:4]})" if f else ""
 
 
+def predeterminado():
+    """Id del modelo de MODELO_PT (relativo a /modelos, sin extensión). Si ese modelo ya no se ofrece (por ejemplo, una U-Net
+    de 1 canal de la raíz), se usa el de ModelosVol3 con el mismo nombre y, si tampoco está, el primero del catálogo."""
+    ruta = Path(os.environ.get("MODELO_PT", f"{CARPETA}/{VOL3}/unet_efficientnet-b0.pt"))
+    try:
+        propio = ruta.relative_to(CARPETA).with_suffix("").as_posix()
+    except ValueError:
+        propio = ruta.stem
+    ids = [m["id"] for m in catalogo()]
+    return next((c for c in (propio, f"{VOL3}/{ruta.stem}") if c in ids), ids[0] if ids else propio)
+
+
 def texto_comparacion(secos):
     if not secos:
         return "sin día seco de referencia"
@@ -39,7 +51,7 @@ def texto_comparacion(secos):
 class Procesador:
     def __init__(self):
         # MODELO_PT es el modelo que se usa cuando no se elige ninguno
-        self.predeterminado = Path(os.environ.get("MODELO_PT", "/modelos/unet_resnet34.pt")).stem
+        self.predeterminado = predeterminado()
         self.modelos = Modelos(self.predeterminado)
         self.credenciales = preparar_credenciales()
 

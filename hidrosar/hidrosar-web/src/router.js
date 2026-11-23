@@ -7,6 +7,7 @@ const rutas = [
   { path: '/', component: () => import('./views/MapaView.vue'), meta: { titulo: 'Mapa' } },
   { path: '/lluvias', component: () => import('./views/LluviasView.vue'), meta: { titulo: 'Lluvias' } },
   { path: '/evaluaciones', component: () => import('./views/EvaluacionesView.vue'), meta: { titulo: 'Evaluaciones' } },
+  { path: '/validaciones', component: () => import('./views/ValidacionesView.vue'), meta: { titulo: 'Validaciones' } },
   { path: '/usuarios', component: () => import('./views/UsuariosView.vue'), meta: { admin: true, titulo: 'Usuarios' } },
   { path: '/:resto(.*)*', redirect: '/' },
 ]

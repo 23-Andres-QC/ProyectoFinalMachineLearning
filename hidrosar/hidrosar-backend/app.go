@@ -18,6 +18,7 @@ type App struct {
 	busquedas     *cacheBusquedas
 	cacheLluvia   *cacheTTL[[]diaLluvia]
 	cacheASF      *cacheTTL[[]granulo]
+	cacheCatalogo *cacheTTL[catalogoValidacion]
 	limitador     *limitador
 	aviso         chan struct{}
 }
@@ -31,6 +32,7 @@ func nuevaApp(cfg Config, db *pgxpool.Pool) *App {
 		busquedas:     nuevaCache(time.Hour),
 		cacheLluvia:   nuevaCacheTTL[[]diaLluvia](time.Hour),
 		cacheASF:      nuevaCacheTTL[[]granulo](time.Hour),
+		cacheCatalogo: nuevaCacheTTL[catalogoValidacion](time.Minute),
 		limitador:     nuevoLimitador(10, 5*time.Minute),
 		aviso:         make(chan struct{}, 1),
 	}
@@ -65,6 +67,10 @@ func (a *App) rutas() http.Handler {
 	m.Handle("GET /api/evaluaciones/{id}/agua", a.conSesion(a.verAgua))
 	m.Handle("POST /api/evaluaciones/{id}/reintentar", a.conSesion(a.reintentarEvaluacion))
 	m.Handle("DELETE /api/evaluaciones/{id}", a.conSesion(a.eliminarEvaluacion))
+
+	m.Handle("GET /api/validaciones", a.conSesion(a.listarValidaciones))
+	m.Handle("GET /api/validaciones/{id}", a.conSesion(a.verValidacion))
+	m.Handle("POST /api/validaciones/{id}/recalcular", a.soloAdmin(a.recalcularValidacion))
 	return registrar(m)
 }
 

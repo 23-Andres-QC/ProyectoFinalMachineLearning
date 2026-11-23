@@ -1,9 +1,11 @@
 """Catálogo de los modelos que hay en /modelos y cómo corre cada uno.
 
-En el selector se agrupan así:
-- Deep Learning · Vol1: las U-Net de cambio del pipeline final y las U-Net de agua del notebook 01 (raíz de /modelos).
+HidroSAR usa solo los modelos de las carpetas Vol1 y ModelosVol3. En el selector se agrupan así:
+- Deep Learning · Vol1: las 4 U-Net de cambio de pipeline-final.ipynb (carpeta Vol1, unet_cambio_*.pt) y su ensamble.
 - Deep Learning · Vol2: las U-Net de agua de ModelosVol3 (carpeta vol3/).
 - Machine Learning · Vol2: el ML por píxel de ModelosVol3 (carpeta vol3/, a 5 m).
+Las U-Net de 1 canal de la raíz de /modelos (unet_<encoder>.pt, de una corrida anterior) ya no se ofrecen: las
+evaluaciones hechas con ellas muestran el modelo como «(retirado)».
 Los id de vol3/ no cambian para que las evaluaciones guardadas sigan apuntando a su modelo.
 
 Hay dos tipos:
@@ -59,7 +61,6 @@ DESCRIPCION = {
               "Necesita al menos un día seco de referencia.",
     "ensamble": "Promedia las 4 U-Net de cambio; fue el mejor modelo del pipeline final. Necesita al menos un día seco "
                 "de referencia.",
-    "unet": "Marca el agua en la imagen de la lluvia y se queda con la que no estaba en los días secos.",
     "vol3_unet": "U-Net de 1 canal del notebook 01 con el umbral que trae guardado. Marca el agua en la imagen "
                  "de la lluvia y se queda con la que no estaba en los días secos.",
     "vol3_ml": "Clasifica cada píxel a 5 m con la media y la desviación de HH en ventanas de 5×5 y 15×15 (notebook 01, "
@@ -97,10 +98,6 @@ def catalogo():
     for p in cambio:
         lista.append({"id": p.stem, "nombre": f"U-Net de cambio {p.stem.removeprefix('unet_cambio_')}",
                       "familia": FAMILIAS["vol1_dl"], "tipo": "cambio", "descripcion": DESCRIPCION["cambio"]})
-    for p in sorted(CARPETA.glob("unet_*.pt")):
-        if not p.stem.startswith("unet_cambio_"):
-            lista.append({"id": p.stem, "nombre": f"U-Net {p.stem.removeprefix('unet_')}", "familia": FAMILIAS["vol1_dl"],
-                          "tipo": "agua", "descripcion": DESCRIPCION["unet"]})
     vol3 = CARPETA / VOL3
     for familia, patron in (("vol2_dl", "unet_*.pt"), ("vol2_ml", "ml_*.joblib")):
         for p in sorted(vol3.glob(patron), key=lambda p: _sin_tildes(NOMBRES_VOL3.get(p.stem, p.stem))):

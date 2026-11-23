@@ -42,15 +42,26 @@ func (a *App) avisarCola() {
 }
 
 // procesarCola atiende las evaluaciones de una en una, en orden de llegada. La cola vive en la base de datos:
-// si el backend se reinicia, lo que quedó a medias vuelve a la cola.
+// si el backend se reinicia, lo que quedó a medias vuelve a la cola. Cuando no hay evaluaciones esperando, avanza con
+// las validaciones de los modelos (una a la vez, y antes de cada una vuelve a mirar si llegó una evaluación).
 func (a *App) procesarCola(ctx context.Context) {
 	if _, err := a.db.Exec(ctx, `UPDATE evaluaciones SET estado = 'en_cola', iniciado = NULL, progreso = NULL WHERE estado = 'procesando'`); err != nil {
 		log.Printf("cola: %v", err)
 	}
+	if _, err := a.db.Exec(ctx, `UPDATE validaciones SET estado = 'pendiente', iniciado = NULL WHERE estado = 'procesando'`); err != nil {
+		log.Printf("validaciones: %v", err)
+	}
 	reloj := time.NewTicker(10 * time.Second)
 	defer reloj.Stop()
+	var modelos []string
+	var sincronizado time.Time
 	for {
-		for a.atenderSiguiente(ctx) {
+		if time.Since(sincronizado) > 5*time.Minute {
+			if ids, err := a.sincronizarValidaciones(ctx); err == nil {
+				modelos, sincronizado = ids, time.Now()
+			}
+		}
+		for a.atenderSiguiente(ctx) || a.validarSiguiente(ctx, modelos) {
 		}
 		select {
 		case <-ctx.Done():

@@ -40,6 +40,7 @@ router.afterEach(async () => {
       <RouterLink to="/"><Icono nombre="mapa" /><span>Mapa</span></RouterLink>
       <RouterLink to="/lluvias"><Icono nombre="lluvia" /><span>Lluvias</span></RouterLink>
       <RouterLink to="/evaluaciones"><Icono nombre="lista" /><span>Evaluaciones</span></RouterLink>
+      <RouterLink to="/validaciones"><Icono nombre="modelo" /><span>Validaciones</span></RouterLink>
       <RouterLink v-if="sesion.usuario.rol === 'administrador'" to="/usuarios"><Icono nombre="usuarios" /><span>Usuarios</span></RouterLink>
     </nav>
     <div class="cuenta">
