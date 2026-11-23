@@ -10,6 +10,8 @@ shapely
 matplotlib
 tqdm
 scikit-learn
+xgboost
+folium
 joblib
 requests
 jupyter
