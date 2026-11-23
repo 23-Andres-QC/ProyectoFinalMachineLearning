@@ -129,6 +129,9 @@ La lista está en `MODELOS` de `hidrosar-modelo/validacion.py`.
 | Concepción (097 D) | lluvia 24/09/2026 | 19/08/2026 |
 | Puerto Montt (104 A) | lluvia 15/07/2026 | — |
 | Lima Sur (003 A) | lluvia 05/11/2026 | 25/08/2026 |
+| Arequipa (025 D), lado este: Chiguata y la falda del Misti | lluvia 15/02/2026 | 13/10/2026 (posterior) |
+
+- Los recortes de Arequipa cubren solo el lado este de la ciudad. De sus dos lluvias se valida la del 15/02, que comparte más zona con el día seco. Como allí no hay agua permanente para calibrar la etiqueta, se usa la mediana de los umbrales de las otras lluvias (−14 dB), igual que en `finalvol1.ipynb`.
 
 - En el mapa se ven tres capas, cada una se puede apagar:
   - **aciertos** (azul): agua que marcan el modelo y la referencia;

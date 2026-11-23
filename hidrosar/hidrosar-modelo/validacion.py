@@ -60,6 +60,12 @@ ESCENAS = [
     {"clave": "lima_sur_2026-11-05", "ciudad": "lima", "lugar": "Lima Sur", "pista": "003_A", "fecha": "20261105",
      "seco": "20260825", "dia": "lluvia", "origen": "Evento de pipeline-final.ipynb y prueba de finalvol1.ipynb",
      "bbox": (-77.04, -12.25, -76.89, -12.16)},
+    # Arequipa: lluvia de predicción de finalvol1.ipynb (sin agua permanente para calibrar la etiqueta). Los recortes
+    # cubren solo el lado este de la ciudad (Chiguata y la falda del Misti); de las dos lluvias se usa la del 15/02, que
+    # comparte más zona con el día seco de la misma órbita (13/10/2026, posterior a la lluvia)
+    {"clave": "arequipa_2026-02-15", "ciudad": "arequipa", "lugar": "Arequipa", "pista": "025_D", "fecha": "20260215",
+     "seco": "20261013", "dia": "lluvia", "origen": "Predicción de finalvol1.ipynb",
+     "bbox": (-71.42, -16.47, -71.29, -16.35)},
 ]
 _ESCENA = {e["clave"]: e for e in ESCENAS}
 
@@ -106,14 +112,15 @@ def _umbral_wc(s, valido, plano, wc):
 
 
 def _etiqueta(e, s, valido, dem, wc):
-    """Etiqueta del mismo día de finalvol1.ipynb (sección 3.4)."""
+    """Etiqueta del mismo día de finalvol1.ipynb (sección 3.4). Devuelve también si se usó el umbral de respaldo (zona
+    sin agua permanente para calibrar, como Arequipa)."""
     if e["dia"] == "seco":
-        return valido & (wc == 80)
+        return valido & (wc == 80), False
     plano = valido & (AguaPixelML._pendiente(dem) < 5)
     umbral = _umbral_wc(s, valido, plano, wc)
     agua = ndimage.binary_opening((s < (UMBRAL_RESPALDO if umbral is None else umbral)) & plano, iterations=2)
     manchas, _ = ndimage.label(agua)
-    return agua & (np.bincount(manchas.ravel())[manchas] >= 40)
+    return agua & (np.bincount(manchas.ravel())[manchas] >= 40), umbral is None
 
 
 @lru_cache(maxsize=1)
@@ -132,7 +139,8 @@ def _zona(clave):
     if valido.mean() < 0.01:
         raise ErrorProceso("La pasada no tiene datos del radar en la zona de validación")
     s = suave(hh)
-    z = {"g": g, "dem": dem, "hh": hh, "s": s, "valido": valido, "etiqueta": _etiqueta(e, s, valido, dem, wc)}
+    etiqueta, respaldo = _etiqueta(e, s, valido, dem, wc)
+    z = {"g": g, "dem": dem, "hh": hh, "s": s, "valido": valido, "etiqueta": etiqueta, "respaldo": respaldo}
     if e["seco"]:
         seco = _archivos(e, e["seco"])
         if not seco:
@@ -166,7 +174,9 @@ def validar(clave, modelo_id, modelos):
         zona, referencia = z["valido"], z["etiqueta"]
         marcado = modelo.agua(z["hh"], z["s"], z["dem"]) & zona
         texto = ("el agua permanente de WorldCover (día seco)" if e["dia"] == "seco"
-                 else "la etiqueta del mismo día de finalvol1.ipynb")
+                 else "la etiqueta del mismo día de finalvol1.ipynb" + (
+                     ", con la mediana de los umbrales de las otras lluvias (aquí no hay agua permanente para calibrarlo)"
+                     if z["respaldo"] else ""))
     capas = {"aciertos": marcado & referencia, "falsas": marcado & ~referencia & zona, "omisiones": referencia & ~marcado}
     salida = {"escena": clave, "modelo": info["id"], "bbox": list(e["bbox"]), "referencia": texto}
     for nombre, m in capas.items():
