@@ -172,7 +172,7 @@ onBeforeUnmount(() => clearTimeout(sondeo))
                   <td class="acciones-fila">
                     <RouterLink v-if="v.estado === 'completado'" :to="{ path: '/', query: { validacion: v.id } }">Ver en el mapa</RouterLink>
                     <button
-                      v-if="esAdmin && ['completado', 'error'].includes(v.estado)"
+                      v-if="esAdmin && e.disponible && ['completado', 'error'].includes(v.estado)"
                       type="button"
                       class="boton-texto"
                       @click="recalcular(v)"

@@ -305,10 +305,36 @@ func (a *App) verValidacion(w http.ResponseWriter, r *http.Request, s *Sesion) {
 }
 
 // recalcularValidacion vuelve a poner en cola una validación terminada (por ejemplo, después de cambiar un modelo).
+// Solo si están los recortes NISAR de la zona: en un servidor que recibió las validaciones ya calculadas (con la base de
+// datos) se borrarían los polígonos y luego fallaría.
 func (a *App) recalcularValidacion(w http.ResponseWriter, r *http.Request, s *Sesion) {
 	id, ok := idDeRuta(r)
 	if !ok {
 		responderError(w, http.StatusBadRequest, "Validación inválida")
+		return
+	}
+	var escena string
+	if err := a.db.QueryRow(r.Context(), `SELECT escena FROM validaciones WHERE id = $1`, id).Scan(&escena); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			responderError(w, http.StatusNotFound, "La validación no existe")
+		} else {
+			a.errorInterno(w, err)
+		}
+		return
+	}
+	c, err := a.catalogo(r.Context())
+	if err != nil {
+		responderError(w, http.StatusServiceUnavailable, "El servicio del modelo no responde")
+		return
+	}
+	disponible := false
+	for _, e := range c.Escenas {
+		if e.Clave == escena {
+			disponible = e.Disponible
+		}
+	}
+	if !disponible {
+		responderError(w, http.StatusConflict, "Aquí no están los recortes NISAR de esa zona: la validación se queda como está")
 		return
 	}
 	etiqueta, err := a.db.Exec(r.Context(), `UPDATE validaciones SET estado = 'pendiente', mensaje = '', intentos = 0,
